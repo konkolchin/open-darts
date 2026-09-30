@@ -1,4 +1,11 @@
 # #.#.# [Future]
+- Geomechanical models ([!355](https://gitlab.com/open-darts/open-darts/-/merge_requests/355)):
+  - `mech_discretizer`: fixed traction and face displacement where the Biot coefficient or thermal expansion jumps between cells (layered models); the two-layer Terzaghi displacement error drops from 0.213 m to 0.0043 m. Results of such models change; homogeneous cases are unchanged to round-off. 
+  - `mech_discretizer`: fixed boundary faces on non-orthogonal meshes (loaded no-flow faces were off by up to 30% on hex), the gravity term of the interface pressure, and two crashes/memory corruptions with `neumann_boundaries_grad_reconstruction = False` and `gradients_extended_stencil = True`. `SPE10_mech` thermal runs change by less than 0.1%. 
+  - `UnstructReservoirMech.init_gravity()` without `gravity_coeff` now uses g instead of Newton's gravitational constant; an unknown direction raises `ValueError`.
+  - `pm_discretizer` VTK output now writes E and nu per region. 
+- Breaking changes:
+  - Results of `mech_discretizer` models with Biot or thermal-expansion contrasts, and of models using the default `init_gravity()`, change. Layered models that start from non-zero pressure or temperature should be initialized with `set_equilibrium`. ([!355](https://gitlab.com/open-darts/open-darts/-/merge_requests/355))
 
 # 2.0.0 [10-09-2026]
 - Solvers ([!280](https://gitlab.com/open-darts/open-darts/-/merge_requests/280)):

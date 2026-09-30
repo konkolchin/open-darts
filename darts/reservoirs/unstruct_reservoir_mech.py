@@ -389,11 +389,17 @@ class UnstructReservoirMech:
     def init_matrix_stiffness(self, props):
         self.unstr_discr.stiffness = {}
         self.unstr_discr.stf = {}
+        # elastic moduli per region, read by write_to_vtk for the pm_discretizer output
+        self.unstr_discr.E = {}
+        self.unstr_discr.nu = {}
         for id, prop in props.items():
             self.unstr_discr.stiffness[id] = prop['stiffness']
             self.unstr_discr.stf[id] = self.unstr_discr.get_stiffness_submatrices(
                 self.unstr_discr.stiffness[id]
             )
+            if 'E' in prop and 'nu' in prop:
+                self.unstr_discr.E[id] = prop['E']
+                self.unstr_discr.nu[id] = prop['nu']
 
     def init_pm_discretizer(self):
         self.unstr_discr.x_new = np.ones(
@@ -763,10 +769,12 @@ class UnstructReservoirMech:
         sets gravity vector in discretizer
         '''
         if gravity_on:
-            from scipy.constants import gravitational_constant
+            # standard acceleration of gravity (scipy's gravitational_constant is Newton's G)
+            from scipy.constants import g as standard_gravity
 
             if gravity_coeff is None:
-                g_coeff = gravitational_constant / 1e5  # convert units
+                # [m/s2] -> [bar/m per kg/m3], the density is applied in the engine
+                g_coeff = standard_gravity / 1e5
             else:
                 g_coeff = gravity_coeff
 
@@ -782,7 +790,7 @@ class UnstructReservoirMech:
         elif gravity_direction in ['z+', 'z-']:
             grav_vec = [0.0, 0.0, g_coeff]
         else:
-            raise ('Unknown gravity_direction', gravity_direction)
+            raise ValueError(f'Unknown gravity_direction {gravity_direction!r}')
         grav_vec = matrix(grav_vec, 1, 3)  # n_dims=3
         if self.discretizer_name == 'mech_discretizer':
             self.discr.grav_vec = grav_vec
@@ -1523,14 +1531,18 @@ class UnstructReservoirMech:
                         cell_data['poisson'] = []
                     cell_data['E'].append(np.zeros(cell_size, dtype=np.float64))
                     cell_data['poisson'].append(np.zeros(cell_size, dtype=np.float64))
-                    E = self.unstr_discr.E
-                    poisson = self.unstr_discr.nu
-                    cell_data['E'][-1][:] = E[
-                        list(E.keys())[0]
-                    ]  # TODO for heterogeneous
-                    cell_data['poisson'][-1][:] = poisson[
-                        list(poisson.keys())[0]
-                    ]  # TODO for heterogeneous
+                    # elastic moduli of the region of every cell, NaN for a region without E, nu
+                    E = getattr(self.unstr_discr, 'E', {})
+                    poisson = getattr(self.unstr_discr, 'nu', {})
+                    regions = [
+                        cell.prop_id
+                        for cell in self.unstr_discr.mat_cell_info_dict.values()
+                        if cell.geometry_type == ith_geometry
+                    ]
+                    cell_data['E'][-1][:] = [E.get(r, np.nan) for r in regions]
+                    cell_data['poisson'][-1][:] = [
+                        poisson.get(r, np.nan) for r in regions
+                    ]
 
                     if 'eff_stress' not in cell_data:
                         cell_data['eff_stress'] = []

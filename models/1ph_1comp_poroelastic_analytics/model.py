@@ -210,7 +210,7 @@ class Model(THMCModel):
                 biot=self.idata.rock.biot, poro0=self.idata.rock.porosity)
             self.idata.other.kd = get_bulk_modulus(self.idata.rock.E, self.idata.rock.nu)
             self.idata.other.M = get_biot_modulus(biot=self.idata.rock.biot, poro0=self.idata.rock.porosity,
-                                                  kd=self.idata.other.kd, cf=self.idata.rock.compressibility)
+                                                  kd=self.idata.other.kd, cf=self.idata.fluid.compressibility)
             self.idata.make_prop_arrays()
 
             self.idata.other.F = -100.0 # bar * m
@@ -262,9 +262,7 @@ class Model(THMCModel):
 
         if case == 'terzaghi_two_layers':
             # short names
-            b = self.idata.rock.biot; nu = self.idata.rock.nu; E = self.idata.rock.E;
-            M = get_biot_modulus(biot=b, poro0=self.idata.rock.porosity, cf=self.idata.fluid.compressibility,
-                                 kd=get_bulk_modulus(E=self.idata.rock.E, nu=self.idata.rock.nu));
+            b = self.idata.rock.biot; nu = self.idata.rock.nu; E = self.idata.rock.E; M = self.idata.other.M
             # some numbers for analytics
             self.idata.other.m = m = (1 + nu) * (1 - 2 * nu) / E / (1 - nu)
             self.idata.other.skempton = b * m * M / (1 + b ** 2 * m * M)
