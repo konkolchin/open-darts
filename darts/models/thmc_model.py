@@ -355,8 +355,17 @@ class THMCModel(DartsModel):
         Function to get the needed performance data
         """
         perf_data = dict()
-        perf_data['solution'] = np.copy(self.physics.engine.X)
-        perf_data['variables'] = ['ux', 'uy', 'uz', 'p']
+        engine = self.physics.engine
+        perf_data['solution'] = np.copy(engine.X)
+        # names of the unknowns in engine order: [p, (z..), (T), ux, uy, uz] or [ux, uy, uz, p]
+        variables = ['z'] * engine.N_VARS
+        variables[engine.P_VAR] = 'p'
+        # T_VAR equals U_VAR in isothermal engines
+        t_var = getattr(engine, 'T_VAR', engine.U_VAR)
+        if t_var < engine.U_VAR and t_var != engine.P_VAR:
+            variables[t_var] = 'T'
+        variables[engine.U_VAR : engine.U_VAR + 3] = ['ux', 'uy', 'uz']
+        perf_data['variables'] = variables
         perf_data['reservoir blocks'] = self.reservoir.mesh.n_blocks
 
         if is_last_ts:
@@ -493,7 +502,8 @@ class THMCModel(DartsModel):
                     )
                     fail += 1
 
-            if not fail:
-                return 0
-            else:
-                return 1
+        # decide after all parameters are checked
+        if not fail:
+            return 0
+        else:
+            return 1

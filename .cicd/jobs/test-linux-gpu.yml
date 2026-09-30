@@ -4,8 +4,9 @@
         # run simulation fot test models set
         - cd models
         # passing additional argument LOG to trigger verbose check performance
-        - systemd-run --scope -p MemoryMax=30000M -p MemoryHigh=20000M --user darts run_test_suite2.py LOG
-        - echo "run_test_suite2 returned" $?
+        # keep the status so the tests below still run when models fail
+        - systemd-run --scope -p MemoryMax=30000M -p MemoryHigh=20000M --user darts run_test_suite2.py LOG || MODELS_STATUS=$?
+        - echo "run_test_suite2 returned ${MODELS_STATUS:-0}"
         - cd ..
         # test interpolators from outside the checkout so Python imports the installed wheel
         - |
@@ -20,6 +21,7 @@
         - cd ../../..
         #
         - echo "test finished"
+        - exit "${MODELS_STATUS:-0}"
     after_script:
         - &archive_logic
             - cd models
@@ -87,6 +89,10 @@ test-linux-oahu-gpu:
     extends: .test-linux-gpu
     variables:
         CONDAPATH: /data/gitlab-runner/miniconda3
+        # Job-private conda package cache (same fix as pre-commit/gitingest):
+        # concurrent tahiti jobs racing on the shared miniconda3/pkgs/ cache
+        # break each other's downloads/extractions.
+        CONDA_PKGS_DIRS: "${CI_PROJECT_DIR}/.conda-pkgs"
     before_script:
         - spack env activate open_darts_gcc134
         - . "${CONDAPATH}/etc/profile.d/conda.sh"
@@ -118,6 +124,12 @@ test-linux-tahiti-image-gpu:
     tags:
         - linux_tahiti_gpu
     extends: .test-linux-gpu
+    variables:
+        # Job-private conda package cache (same fix as pre-commit/gitingest):
+        # the image's conda uses the shared /data/gitlab-runner/miniconda3/pkgs/
+        # cache (runner ~/.condarc); two concurrent test jobs racing on it failed
+        # with "Encountered corrupt package tarball" / ".partial" rename errors.
+        CONDA_PKGS_DIRS: "${CI_PROJECT_DIR}/.conda-pkgs"
     before_script:
         - |
           set -euo pipefail
@@ -174,8 +186,8 @@ test-linux-tahiti-image-gpu:
             source /opt/conda/etc/profile.d/conda.sh && \
             conda activate ${CONDA_ENV} && \
             cd models && \
-            darts run_test_suite2.py LOG && \
-            echo 'run_test_suite2 returned' $? && \
+            { darts run_test_suite2.py LOG || MODELS_STATUS=\$?; } && \
+            echo 'run_test_suite2 returned' \${MODELS_STATUS:-0} && \
             cd .. && \
             # test interpolators from outside the checkout so Python imports the installed wheel
             PROJECT_DIR=\${CI_PROJECT_DIR:-\$PWD} && \
@@ -187,7 +199,8 @@ test-linux-tahiti-image-gpu:
             cd discretizer/tests/compare_discretizers && \
             python main.py && \
             cd ../../.. && \
-            echo 'test finished'
+            echo 'test finished' && \
+            exit \${MODELS_STATUS:-0}
             "
     after_script:
         - |

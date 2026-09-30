@@ -26,8 +26,9 @@
         # run simulation fot test models set
         - cd models
         # passing additional argument to trigger verbose check performance
-        - darts run_test_suite2.py LOG
-        - echo "run_test_suite2 returned" $?
+        # keep the status so the tests below still run when models fail
+        - darts run_test_suite2.py LOG || MODELS_STATUS=$?
+        - echo "run_test_suite2 returned ${MODELS_STATUS:-0}"
         - cd ..
         # test interpolators from outside the checkout so Python imports the installed wheel
         - |
@@ -42,6 +43,7 @@
         - cd ../../..
         #
         - echo "test finished"
+        - exit "${MODELS_STATUS:-0}"
     after_script:
         - cd models
         - ./archive_pkl.sh "$ODLS" "$TEST_GPU"

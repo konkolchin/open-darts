@@ -4,6 +4,7 @@ import numpy as np
 import meshio
 from math import fabs
 import os
+import sys
 from scipy.interpolate import interp1d
 import subprocess
 from darts.tools.gen_msh import generate_box_3d
@@ -26,6 +27,25 @@ try:
     set_num_threads(1)
 except:
     pass
+
+def _pkl_suffix():
+    '''
+    Solver/platform suffix of the reference files: '_odls' / '_iter' / '_gpu'.
+    Shares the suite-wide helper, as SPE10_mech does, so the name matches the tracked references;
+    with another suffix the test finds no reference and compares nothing.
+    Falls back to the same rule when main.py
+    is run standalone from this directory, where models/ is not on sys.path.
+    '''
+    models_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if models_dir not in sys.path:
+        sys.path.append(models_dir)
+    try:
+        from compare_well_time_series import get_pkl_suffix
+        return get_pkl_suffix()
+    except ImportError:
+        if os.getenv('TEST_GPU') == '1':
+            return '_gpu'
+        return '_iter' if os.getenv('ODLS') == '-a' else '_odls'
 
 def generate_mesh(mesh='rect'):
     '''
@@ -129,16 +149,13 @@ def test(case='mandel', discr_name='mech_discretizer', mesh='rect', overwrite='0
     print('case:' + case, 'discr_name:' + discr_name, 'mesh: ' + mesh, 'overwrite: ' + overwrite, sep=', ')
     import platform
 
-    nt = 20
-    max_dt = 200
-    t = np.logspace(-3, np.log10(max_dt), nt)
-    # nt = 200
-    # max_t = 200
-    # t = max_t / nt * np.ones(nt)
     if 'rect' in mesh:
         generate_mesh(mesh=mesh)
     m = Model(case=case, discretizer=discr_name, mesh=mesh)
     m.init()
+    # the model's own schedule, as in run_and_plot: 60 log-spaced steps (bai 1e-7..0.1 days, others 1e-3..30 days).
+    # the steps are short relative to the elapsed time, so backward Euler stays close to the analytical solution
+    t = m.idata.sim.time_steps
     redirect_darts_output('log.txt')
     # output_directory = 'sol_{:s}'.format(m.physics_type)
     m.timer.node["update"] = timer_node()
@@ -147,18 +164,20 @@ def test(case='mandel', discr_name='mech_discretizer', mesh='rect', overwrite='0
     time = 0.0
     data = []
 
-    # poromech tests run with direct linear solvers (superlu), but somehow there is a difference
-    # while using old and new lib. To handle this, use '_iter' pkls for old lib
-    pkl_suffix = ''
-    if os.getenv('ODLS') != None and os.getenv('ODLS') == '-a':
-        pkl_suffix = '_iter'
+    pkl_suffix = _pkl_suffix()
     file_name = os.path.join('ref', 'perf_' + platform.system().lower()[:3] + pkl_suffix +
                              '_' + case + '_' + discr_name + '_' + mesh + '.pkl')
     failed = 0
 
     is_plk_exist = os.path.isfile(file_name)
+    compare = is_plk_exist
     if is_plk_exist:
         ref_data = m.load_performance_data(file_name=file_name)
+        if len(ref_data) != t.size:
+            # e.g. after a schedule change: fail instead of an IndexError, and still save with overwrite
+            print('Reference', file_name, 'has', len(ref_data), 'time steps, the run has', t.size, '- not compared')
+            compare = False
+            failed += 1
 
     for ith_step, dt in enumerate(t):
         time += dt
@@ -169,7 +188,7 @@ def test(case='mandel', discr_name='mech_discretizer', mesh='rect', overwrite='0
         # write a vtk snapshot
         # m.reservoir.write_to_vtk(output_directory, ith_step + 1, m.physics)
         data.append(m.get_performance_data(is_last_ts=(ith_step == t.size - 1)))
-        if is_plk_exist:
+        if compare:
             # to compare with analytic need only solution vector
             if False:
                 an_data_step = {'solution' : get_analytic_solution(m, discr_name, t=time)['solution']}

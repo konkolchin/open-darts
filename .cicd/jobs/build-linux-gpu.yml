@@ -62,6 +62,10 @@ build-linux-tahiti-gpu:
         - linux_tahiti_gpu
     variables:
         CONDAPATH: /data/gitlab-runner/miniconda3
+        # Job-private conda package cache (same fix as pre-commit/gitingest):
+        # concurrent tahiti jobs racing on the shared miniconda3/pkgs/ cache
+        # break each other's downloads/extractions.
+        CONDA_PKGS_DIRS: "${CI_PROJECT_DIR}/.conda-pkgs"
     before_script:
         - spack env activate open_darts_gcc134
         - . "${CONDAPATH}/etc/profile.d/conda.sh"
@@ -87,6 +91,12 @@ build-linux-tahiti-image-gpu:
     needs:
         - job: apptainer-image-builder
           artifacts: true
+    variables:
+        # Job-private conda package cache (same fix as pre-commit/gitingest):
+        # the image's conda uses the shared /data/gitlab-runner/miniconda3/pkgs/
+        # cache (runner ~/.condarc), and concurrent jobs racing on it break each
+        # other's downloads/extractions (incl. the Reaktoro conda install).
+        CONDA_PKGS_DIRS: "${CI_PROJECT_DIR}/.conda-pkgs"
     before_script:
         - |
           set -euo pipefail
@@ -101,11 +111,12 @@ build-linux-tahiti-image-gpu:
           fi
           echo "Using Apptainer image: $APPTAINER_IMAGE"
         - echo "🔧 Creating Conda env '${CONDA_ENV}' inside the Apptainer image…"
+        # No `conda clean` here: `-f` (--force-pkgs-dirs) rm -rf's every writable
+        # package cache, i.e. the shared miniconda3/pkgs/ used by concurrent jobs.
         - |
           apptainer exec --nv "$APPTAINER_IMAGE" bash -lc "
             source /opt/conda/etc/profile.d/conda.sh \
-            && conda create -n ${CONDA_ENV} python=${PY_VER} -q -y \
-            && conda clean -afy
+            && conda create -n ${CONDA_ENV} python=${PY_VER} -q -y
           "
     script:
         - echo "🚀 Building DARTS GPU libs inside '${CONDA_ENV}'…"
