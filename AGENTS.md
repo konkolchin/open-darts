@@ -29,6 +29,8 @@
 - Use `$gitlab-cicd-open-darts` when touching `.gitlab-ci.yml`, `.cicd/jobs/`, release/deploy rules, or CI artifact flow.
 - Use `$debug-profile-open-darts` when investigating crashes, leaks, memory issues, slowdowns, or profiling data.
 - Use `$release-readiness-open-darts` when preparing a release, reviewing a version bump or tag, or assessing whether user-visible compatibility, packaging, or deployment changes are safe to ship.
+- Use `$changelog-open-darts` after significant modifications (user-visible behavior, models, physics, solvers, build/CI, API changes) to add a brief `CHANGELOG.md` entry that links the MR and/or commit; record API changes in its Breaking changes section.
+- Use `$code-comments-open-darts` when writing or editing code comments, docstrings, or commit messages: history and evidence go in the commit message, comments describe the code as it stands now.
 
 ### Compatibility rules
 
