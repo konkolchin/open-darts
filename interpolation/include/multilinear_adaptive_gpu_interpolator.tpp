@@ -16,6 +16,11 @@
 
 #define USE_THREAD_PER_OPERATOR_KERNEL
 #define HYPERCUBE_BUFFER_SIZE 100
+// Capacity requested for a new device hypercube map; create_hashmap() rounds it up to 2048 slots. The map doubles
+// before an insert would take it above a 0.7 load factor, so it can start small. add_hypercubes_to_hashmap()
+// threads may read the occupancy after their batch was already added to it, so the slot count must stay above
+// HYPERCUBE_BUFFER_SIZE / 0.3.
+#define HYPERCUBE_MAP_INITIAL_CAPACITY 1024
 
 // ─── kernel forward declarations ───────────────────────────────────────────────
 
@@ -24,7 +29,7 @@ __global__ void multilinear_adaptive3_check_hypercube_ready_kernel(
     const unsigned int n_states_idxs, const int *states_idxs_d, const double *states_d,
     const value_t *axis_min_d, const value_t *axis_step_inv_d,
     gpu_hashmap_async::gpu_hash_map<value_t, (1 << N_DIMS) * N_OPS> *hypercube_data_d,
-    cell_key_t<N_DIMS> *state_hc_keys);
+    cell_key_t<N_DIMS> *state_hc_keys, int *batch_status_d);
 
 template <typename value_t, uint8_t N_DIMS, uint16_t N_OPS, bool FIRST_STAGE>
 __global__ void multilinear_adaptive_interpolate_thread_per_state_stages_kernel(
@@ -46,12 +51,6 @@ __global__ void add_hypercubes_to_hashmap(
     const value_t *new_hypercube_data_d,
     gpu_hashmap_async::gpu_hash_map<value_t, (1 << N_DIMS) * N_OPS> *hypercube_data_d);
 
-template <typename value_t, uint8_t N_DIMS, uint16_t N_OPS>
-__global__ void check_if_hashmap_expansion_needed(
-    const float threshold,
-    gpu_hashmap_async::gpu_hash_map<value_t, (1 << N_DIMS) * N_OPS> *hypercube_data_d,
-    int *expansion_needed);
-
 // ─── constructor / destructor / init ───────────────────────────────────────────
 
 template <typename value_t, uint8_t N_DIMS, uint16_t N_OPS>
@@ -61,31 +60,38 @@ multilinear_adaptive_gpu_interpolator<value_t, N_DIMS, N_OPS>::multilinear_adapt
     const std::vector<double> &axes_step)
     : multilinear_gpu_interpolator_base<uint64_t, value_t, N_DIMS, N_OPS>(supporting_point_evaluator, axes_origin, axes_step)
 {
+  // A multiple of the warp size: the check kernel counts missing hypercubes with a full-warp ballot.
   this->kernel_block_size = 128;
 
-  // initial hashmap size: ~50 MB
-  int max_hypercube_capacity = 50 * 1024 * 1024 / (N_VERTS * N_OPS * sizeof(value_t));
-  hypercube_data_d = gpu_hashmap_async::create_hashmap<value_t, N_VERTS * N_OPS>(max_hypercube_capacity);
+  create_hypercube_map();
 
   cudaStreamCreate(&hypercube_generation_stream);
-  cudaStreamCreate(&stage1_interpolation_stream);
+  cudaEventCreateWithFlags(&batch_status_ready, cudaEventDisableTiming);
 
   new_hypercube_data_buffer.resize(HYPERCUBE_BUFFER_SIZE * N_OPS * N_VERTS);
   new_hypercube_index_buffer.resize(HYPERCUBE_BUFFER_SIZE);
   new_hypercube_data_buffer_d.resize(HYPERCUBE_BUFFER_SIZE * N_OPS * N_VERTS);
   new_hypercube_index_buffer_d.resize(HYPERCUBE_BUFFER_SIZE);
-  new_hypercube_data.resize(HYPERCUBE_BUFFER_SIZE * N_OPS * N_VERTS);
-  new_hypercube_index.resize(HYPERCUBE_BUFFER_SIZE);
-  hashmap_expansion_needed.resize(1);
-  hashmap_expansion_needed_d.resize(1);
-  axis_overflow_count_host.resize(1);
-  axis_overflow_count_d.resize(1);
+  batch_status_host.resize(2);
+  batch_status_d.resize(2);
 }
 
 template <typename value_t, uint8_t N_DIMS, uint16_t N_OPS>
 multilinear_adaptive_gpu_interpolator<value_t, N_DIMS, N_OPS>::~multilinear_adaptive_gpu_interpolator()
 {
   gpu_hashmap_async::delete_hashmap(hypercube_data_d);
+  cudaEventDestroy(batch_status_ready);
+  cudaStreamDestroy(hypercube_generation_stream);
+}
+
+template <typename value_t, uint8_t N_DIMS, uint16_t N_OPS>
+void multilinear_adaptive_gpu_interpolator<value_t, N_DIMS, N_OPS>::create_hypercube_map()
+{
+  hypercube_data_d = gpu_hashmap_async::create_hashmap<value_t, N_VERTS * N_OPS>(HYPERCUBE_MAP_INITIAL_CAPACITY);
+  gpu_hashmap_async::gpu_hash_map<value_t, N_VERTS * N_OPS> header;
+  cudaMemcpy(&header, hypercube_data_d, sizeof(header), cudaMemcpyDeviceToHost);
+  hashmap_size = header.size;
+  hashmap_occupied = header.occupied;
 }
 
 template <typename value_t, uint8_t N_DIMS, uint16_t N_OPS>
@@ -98,12 +104,10 @@ template <typename value_t, uint8_t N_DIMS, uint16_t N_OPS>
 void multilinear_adaptive_gpu_interpolator<value_t, N_DIMS, N_OPS>::clear_hypercube_data()
 {
   // Drop the device hypercube map and the host key tracker; both are rebuilt on
-  // demand from point_data (no flash). Mirrors the destructor + constructor so the
-  // fresh map starts at the same ~50 MB capacity. point_data and the on-disk cache
-  // are untouched.
+  // demand from point_data (no flash). The fresh map starts at the initial capacity,
+  // as in the constructor. point_data and the on-disk cache are untouched.
   gpu_hashmap_async::delete_hashmap(hypercube_data_d);
-  int max_hypercube_capacity = 50 * 1024 * 1024 / (N_VERTS * N_OPS * sizeof(value_t));
-  hypercube_data_d = gpu_hashmap_async::create_hashmap<value_t, N_VERTS * N_OPS>(max_hypercube_capacity);
+  create_hypercube_map();
   generated_hypercubes.clear();
 }
 
@@ -173,17 +177,51 @@ int multilinear_adaptive_gpu_interpolator<value_t, N_DIMS, N_OPS>::generate_hype
 // ─── batch evaluation ──────────────────────────────────────────────────────────
 
 template <typename value_t, uint8_t N_DIMS, uint16_t N_OPS>
+template <bool FIRST_STAGE>
+void multilinear_adaptive_gpu_interpolator<value_t, N_DIMS, N_OPS>::launch_interpolation_stage(
+    int n_states_idxs, double *states_d, int *states_idxs_d, double *values_d, double *derivatives_d)
+{
+#ifdef USE_THREAD_PER_OPERATOR_KERNEL
+  multilinear_adaptive_interpolate_thread_per_operator_stages_kernel<value_t, N_DIMS, N_OPS, FIRST_STAGE>
+      KERNEL_1D_THREAD(n_states_idxs * N_OPS, this->kernel_block_size)(
+          n_states_idxs, states_idxs_d, states_d,
+          thrust::raw_pointer_cast(this->axes_origin_d.data()),
+          thrust::raw_pointer_cast(this->axes_step_d.data()),
+          thrust::raw_pointer_cast(this->axes_step_inv_d.data()),
+          hypercube_data_d,
+          thrust::raw_pointer_cast(state_hc_keys_d.data()),
+          values_d, derivatives_d);
+#else
+  multilinear_adaptive_interpolate_thread_per_state_stages_kernel<value_t, N_DIMS, N_OPS, FIRST_STAGE>
+      KERNEL_1D_THREAD(n_states_idxs, this->kernel_block_size)(
+          n_states_idxs, states_idxs_d, states_d,
+          thrust::raw_pointer_cast(this->axes_origin_d.data()),
+          thrust::raw_pointer_cast(this->axes_step_d.data()),
+          thrust::raw_pointer_cast(this->axes_step_inv_d.data()),
+          hypercube_data_d,
+          thrust::raw_pointer_cast(state_hc_keys_d.data()),
+          values_d, derivatives_d);
+#endif
+}
+
+template <typename value_t, uint8_t N_DIMS, uint16_t N_OPS>
 int multilinear_adaptive_gpu_interpolator<value_t, N_DIMS, N_OPS>::evaluate_with_derivatives_d(
     int n_states_idxs, double *states_d, int *states_idxs_d,
     double *values_d, double *derivatives_d)
 {
   this->timer->start();
   this->timer->node["gpu interpolation"].start();
-  static int detailed_timing = 0;
 
   // One batch interpolation call == one nonlinear-iteration assembly of this operator
   // set: advance the epoch stamp applied to points materialized during this call.
   eval_index++;
+
+  if (n_states_idxs <= 0)
+  {
+    this->timer->node["gpu interpolation"].stop();
+    this->timer->stop();
+    return 0;
+  }
 
   // Bound the device hypercube cache: when it exceeds hypercube_cap, drop all cached
   // hypercubes (host tracker + device map) and let this batch rebuild only its working
@@ -194,14 +232,14 @@ int multilinear_adaptive_gpu_interpolator<value_t, N_DIMS, N_OPS>::evaluate_with
     clear_hypercube_data();
 
   state_hc_keys_d.resize(n_states_idxs);
-  hypercubes_to_compute.resize(n_states_idxs);
 
-  // Reset the per-batch int32 cell-index overflow accumulator; the check kernel
-  // atomicAdds into it, and it is read back off the hot path near the end of the batch.
-  axis_overflow_count_d[0] = 0;
-
-  if (detailed_timing)
-    this->timer->node["gpu interpolation"].node["check"].start_gpu();
+  // Look up every state's hypercube. The check kernel counts the states whose hypercube
+  // is missing and the int32 cell-index overflows into batch_status_d; only these two
+  // counters are copied to the host. The first-stage kernel (states whose hypercube is
+  // cached) is queued behind that copy, so it runs while the host waits for the status.
+  int *batch_status_d_ptr = thrust::raw_pointer_cast(batch_status_d.data());
+  const int *batch_status = thrust::raw_pointer_cast(batch_status_host.data());
+  cudaMemsetAsync(batch_status_d_ptr, 0, 2 * sizeof(int));
   multilinear_adaptive3_check_hypercube_ready_kernel<value_t, N_DIMS, N_OPS>
       KERNEL_1D_THREAD(n_states_idxs, this->kernel_block_size)(
           n_states_idxs, states_idxs_d, states_d,
@@ -209,51 +247,33 @@ int multilinear_adaptive_gpu_interpolator<value_t, N_DIMS, N_OPS>::evaluate_with
           thrust::raw_pointer_cast(this->axes_step_inv_d.data()),
           hypercube_data_d,
           thrust::raw_pointer_cast(state_hc_keys_d.data()),
-          thrust::raw_pointer_cast(axis_overflow_count_d.data()));
-  if (detailed_timing)
-    this->timer->node["gpu interpolation"].node["check"].stop_gpu();
+          batch_status_d_ptr);
+  cudaMemcpyAsync(thrust::raw_pointer_cast(batch_status_host.data()), batch_status_d_ptr, 2 * sizeof(int),
+                  cudaMemcpyDeviceToHost);
+  cudaEventRecord(batch_status_ready);
+  launch_interpolation_stage<true>(n_states_idxs, states_d, states_idxs_d, values_d, derivatives_d);
+  cudaEventSynchronize(batch_status_ready);
+  const int n_missing_states = batch_status[0];
+  const int n_axis_overflows = batch_status[1];
 
-  if (detailed_timing)
-    this->timer->node["gpu interpolation"].node["1st stage + gen"].start_gpu();
-  if (detailed_timing)
-    this->timer->node["gpu interpolation"].node["1st stage"].start_gpu(stage1_interpolation_stream);
+  if (n_missing_states == 0)
+  {
+    // Every state's hypercube was cached: the first stage interpolates them all.
+    this->timer->node["gpu interpolation"].stop();
+    this->report_axis_index_overflows(static_cast<uint64_t>(n_axis_overflows),
+                                      this->axes_origin, this->axes_step);
+    this->n_interpolations += N_OPS * n_states_idxs;
+    this->timer->stop();
+    return 0;
+  }
 
-#ifdef USE_THREAD_PER_OPERATOR_KERNEL
-  multilinear_adaptive_interpolate_thread_per_operator_stages_kernel<value_t, N_DIMS, N_OPS, true>
-      KERNEL_1D_THREAD_STREAM(n_states_idxs * N_OPS, this->kernel_block_size, stage1_interpolation_stream)(
-          n_states_idxs, states_idxs_d, states_d,
-          thrust::raw_pointer_cast(this->axes_origin_d.data()),
-          thrust::raw_pointer_cast(this->axes_step_d.data()),
-          thrust::raw_pointer_cast(this->axes_step_inv_d.data()),
-          hypercube_data_d,
-          thrust::raw_pointer_cast(state_hc_keys_d.data()),
-          values_d, derivatives_d);
-#else
-  multilinear_adaptive_interpolate_thread_per_state_stages_kernel<value_t, N_DIMS, N_OPS, true>
-      KERNEL_1D_THREAD_STREAM(n_states_idxs, this->kernel_block_size, stage1_interpolation_stream)(
-          n_states_idxs, states_idxs_d, states_d,
-          thrust::raw_pointer_cast(this->axes_origin_d.data()),
-          thrust::raw_pointer_cast(this->axes_step_d.data()),
-          thrust::raw_pointer_cast(this->axes_step_inv_d.data()),
-          hypercube_data_d,
-          thrust::raw_pointer_cast(state_hc_keys_d.data()),
-          values_d, derivatives_d);
-#endif
-
-  if (detailed_timing)
-    this->timer->node["gpu interpolation"].node["1st stage"].stop_gpu(stage1_interpolation_stream);
-
-  if (detailed_timing)
-    this->timer->node["gpu interpolation"].node["gen"].start_gpu(hypercube_generation_stream);
-
-  // Copy hypercube multi-indices to host (DTOH).
+  // Copy hypercube multi-indices to host (DTOH); cached states carry the sentinel.
+  hypercubes_to_compute.resize(n_states_idxs);
   cudaMemcpyAsync(thrust::raw_pointer_cast(hypercubes_to_compute.data()),
                   thrust::raw_pointer_cast(state_hc_keys_d.data()),
                   n_states_idxs * sizeof(key_t),
                   cudaMemcpyDeviceToHost, hypercube_generation_stream);
-
   cudaStreamSynchronize(hypercube_generation_stream);
-  int new_hypercubes_generated = 0;
 
   // ── Batch pre-pass ───────────────────────────────────────────────────────────
   // Collect every UNIQUE missing supporting point across all missing hypercubes and
@@ -317,6 +337,11 @@ int multilinear_adaptive_gpu_interpolator<value_t, N_DIMS, N_OPS>::evaluate_with
     }
   }
 
+  // Generate the missing hypercubes straight into the pinned staging buffers and insert
+  // them into the device map in batches of up to HYPERCUBE_BUFFER_SIZE.
+  bool new_hypercubes_generated = false;
+  value_t *data_staging = thrust::raw_pointer_cast(new_hypercube_data_buffer.data());
+  key_t *index_staging = thrust::raw_pointer_cast(new_hypercube_index_buffer.data());
   for (int i = 0, h = 0; i < n_states_idxs; i++)
   {
     const key_t &hc_key = hypercubes_to_compute[i];
@@ -325,42 +350,32 @@ int multilinear_adaptive_gpu_interpolator<value_t, N_DIMS, N_OPS>::evaluate_with
     if (!is_sentinel && !generated_hypercubes.count(hc_key))
     {
       generated_hypercubes.insert(hc_key);
-      new_hypercube_index[h] = hc_key;
-      generate_hypercube(hc_key, new_hypercube_data.data() + h * N_OPS * N_VERTS);
-      new_hypercubes_generated = 1;
+      index_staging[h] = hc_key;
+      generate_hypercube(hc_key, data_staging + h * N_OPS * N_VERTS);
+      new_hypercubes_generated = true;
       h++;
     }
 
     if (h == HYPERCUBE_BUFFER_SIZE || (i == (n_states_idxs - 1) && h))
     {
-      // Ensure the map has room for THIS batch before inserting it. The other expansion
-      // check runs only once per interpolate() call (after this whole loop), so a single
-      // call that generates more hypercubes than the current capacity overflows the map:
-      // add_hypercubes_to_hashmap then hits its "hashmap overflow" branch and silently
-      // drops the excess, which later surfaces as "hypercube missing". Grow here, before
-      // the batch insert, keeping occupied + h under a 0.7 load factor.
+      // Ensure the map has room for THIS batch before inserting it, keeping occupied + h
+      // under a 0.7 load factor; otherwise add_hypercubes_to_hashmap hits its "hashmap
+      // overflow" branch and silently drops the excess, which later surfaces as
+      // "hypercube missing". Size and occupancy come from the host mirror of the header.
+      bool grew = false;
+      while (static_cast<long long>(hashmap_occupied) + h > static_cast<long long>(0.7 * hashmap_size))
       {
-        gpu_hashmap_async::gpu_hash_map<value_t, N_VERTS * N_OPS> _hdr;
-        cudaMemcpy(&_hdr, hypercube_data_d, sizeof(_hdr), cudaMemcpyDeviceToHost);
-        bool _grew = false;
-        while (static_cast<long long>(_hdr.occupied) + h > static_cast<long long>(0.7 * _hdr.size))
-        {
-          hypercube_data_d = gpu_hashmap_async::expand_hashmap(hypercube_data_d, 2);
-          cudaMemcpy(&_hdr, hypercube_data_d, sizeof(_hdr), cudaMemcpyDeviceToHost);
-          _grew = true;
-        }
-        if (_grew)
-          cudaDeviceSynchronize();  // rehash (default stream) must finish before the batch insert
+        hypercube_data_d = gpu_hashmap_async::expand_hashmap(hypercube_data_d, 2);
+        hashmap_size *= 2;
+        grew = true;
       }
-      thrust::copy(new_hypercube_data.begin(), new_hypercube_data.end(), new_hypercube_data_buffer.begin());
-      thrust::copy(new_hypercube_index.begin(), new_hypercube_index.end(), new_hypercube_index_buffer.begin());
+      if (grew)
+        cudaDeviceSynchronize();  // rehash (default stream) must finish before the batch insert
 
-      cudaMemcpyAsync(thrust::raw_pointer_cast(new_hypercube_data_buffer_d.data()),
-                      thrust::raw_pointer_cast(new_hypercube_data_buffer.data()),
+      cudaMemcpyAsync(thrust::raw_pointer_cast(new_hypercube_data_buffer_d.data()), data_staging,
                       h * sizeof(value_t) * N_OPS * N_VERTS,
                       cudaMemcpyHostToDevice, hypercube_generation_stream);
-      cudaMemcpyAsync(thrust::raw_pointer_cast(new_hypercube_index_buffer_d.data()),
-                      thrust::raw_pointer_cast(new_hypercube_index_buffer.data()),
+      cudaMemcpyAsync(thrust::raw_pointer_cast(new_hypercube_index_buffer_d.data()), index_staging,
                       h * sizeof(key_t),
                       cudaMemcpyHostToDevice, hypercube_generation_stream);
 
@@ -369,77 +384,24 @@ int multilinear_adaptive_gpu_interpolator<value_t, N_DIMS, N_OPS>::evaluate_with
               h, thrust::raw_pointer_cast(new_hypercube_index_buffer_d.data()),
               thrust::raw_pointer_cast(new_hypercube_data_buffer_d.data()),
               hypercube_data_d);
+      hashmap_occupied += h;
 
+      // The next batch refills the staging buffers: wait for the uploads and the insert.
       CUDA_CHECK_RETURN(cudaStreamSynchronize(hypercube_generation_stream));
       h = 0;
     }
   }
-  if (detailed_timing)
-    this->timer->node["gpu interpolation"].node["gen"].stop_gpu(hypercube_generation_stream);
-  if (detailed_timing)
-    this->timer->node["gpu interpolation"].node["wait for 1st stage"].start_gpu();
 
-  cudaDeviceSynchronize();
-
-  if (detailed_timing)
-    this->timer->node["gpu interpolation"].node["wait for 1st stage"].stop_gpu();
-  if (detailed_timing)
-    this->timer->node["gpu interpolation"].node["1st stage + gen"].stop_gpu();
-
-  if (detailed_timing)
-    this->timer->node["gpu interpolation"].node["expansion"].start_gpu();
-
-  check_if_hashmap_expansion_needed<value_t, N_DIMS, N_OPS>
-      <<<1, 1, 0>>>(0.7, hypercube_data_d, thrust::raw_pointer_cast(hashmap_expansion_needed_d.data()));
-
-  cudaMemcpy(thrust::raw_pointer_cast(hashmap_expansion_needed.data()),
-             thrust::raw_pointer_cast(hashmap_expansion_needed_d.data()), sizeof(int),
-             cudaMemcpyDeviceToHost);
-
-  if (hashmap_expansion_needed[0])
-    hypercube_data_d = gpu_hashmap_async::expand_hashmap(hypercube_data_d, 2);
-
-  if (detailed_timing)
-    this->timer->node["gpu interpolation"].node["expansion"].stop_gpu();
-  if (detailed_timing)
-    this->timer->node["gpu interpolation"].node["2nd stage"].start_gpu();
-
+  // Second stage: the states whose hypercube was generated in this call. The inserts
+  // completed above (host-synchronized), and the kernel runs on the default stream.
   if (new_hypercubes_generated)
-  {
-#ifdef USE_THREAD_PER_OPERATOR_KERNEL
-    multilinear_adaptive_interpolate_thread_per_operator_stages_kernel<value_t, N_DIMS, N_OPS, false>
-        KERNEL_1D_THREAD(n_states_idxs * N_OPS, this->kernel_block_size)(
-            n_states_idxs, states_idxs_d, states_d,
-            thrust::raw_pointer_cast(this->axes_origin_d.data()),
-            thrust::raw_pointer_cast(this->axes_step_d.data()),
-            thrust::raw_pointer_cast(this->axes_step_inv_d.data()),
-            hypercube_data_d,
-            thrust::raw_pointer_cast(state_hc_keys_d.data()),
-            values_d, derivatives_d);
-#else
-    multilinear_adaptive_interpolate_thread_per_state_stages_kernel<value_t, N_DIMS, N_OPS, false>
-        KERNEL_1D_THREAD(n_states_idxs, this->kernel_block_size)(
-            n_states_idxs, states_idxs_d, states_d,
-            thrust::raw_pointer_cast(this->axes_origin_d.data()),
-            thrust::raw_pointer_cast(this->axes_step_d.data()),
-            thrust::raw_pointer_cast(this->axes_step_inv_d.data()),
-            hypercube_data_d,
-            thrust::raw_pointer_cast(state_hc_keys_d.data()),
-            values_d, derivatives_d);
-#endif
-    if (detailed_timing)
-      this->timer->node["gpu interpolation"].node["2nd stage"].stop_gpu();
-  }
+    launch_interpolation_stage<false>(n_states_idxs, states_d, states_idxs_d, values_d, derivatives_d);
 
   this->timer->node["gpu interpolation"].stop();
 
-  // Off the hot path: read back this batch's int32 cell-index overflow tally and hand
-  // it to the unified reporter (blocking copy also guarantees the check kernel, which
-  // ran on the default stream, has completed). Same warning path as the CPU backend.
-  cudaMemcpy(thrust::raw_pointer_cast(axis_overflow_count_host.data()),
-             thrust::raw_pointer_cast(axis_overflow_count_d.data()), sizeof(int),
-             cudaMemcpyDeviceToHost);
-  this->report_axis_index_overflows(static_cast<uint64_t>(axis_overflow_count_host[0]),
+  // Hand this batch's int32 cell-index overflow tally to the unified reporter (same
+  // warning path as the CPU backend).
+  this->report_axis_index_overflows(static_cast<uint64_t>(n_axis_overflows),
                                     this->axes_origin, this->axes_step);
 
   this->n_interpolations += N_OPS * n_states_idxs;
@@ -454,40 +416,48 @@ __global__ void multilinear_adaptive3_check_hypercube_ready_kernel(
     const unsigned int n_states_idxs, const int *states_idxs_d, const double *states_d,
     const value_t *axis_min_d, const value_t *axis_step_inv_d,
     gpu_hashmap_async::gpu_hash_map<value_t, (1 << N_DIMS) * N_OPS> *hypercube_data_d,
-    cell_key_t<N_DIMS> *state_hc_keys, int *overflow_counter_d)
+    cell_key_t<N_DIMS> *state_hc_keys, int *batch_status_d)
 {
   const unsigned i = blockIdx.x * blockDim.x + threadIdx.x;
-  if (i > n_states_idxs - 1)
-    return;
-
-  int state_idx = states_idxs_d[i];
-
-  // Per-thread int32 cell-index overflow tally, accumulated branchlessly into a
-  // register. This is the canonical index computation for the batch (mirrors CPU
-  // Phase 1); the interpolate kernels re-derive the index without counting so cells
-  // are tallied once. Reduced to the device accumulator below only if nonzero — a
-  // warp-coherent, almost-always-not-taken branch, so effectively free on the hot path.
-  int cell_overflows = 0;
-  cell_key_t<N_DIMS> hc_key;
-  for (int d = 0; d < N_DIMS; ++d)
+  bool missing = false;
+  if (i < n_states_idxs)
   {
-    hc_key.idx[d] = get_axis_interval_index_unbounded<value_t>(
-        states_d[state_idx * N_DIMS + d], axis_min_d[d], axis_step_inv_d[d], &cell_overflows);
-  }
-  if (cell_overflows)
-    atomicAdd(overflow_counter_d, cell_overflows);
+    int state_idx = states_idxs_d[i];
 
-  value_t *hypercube_data;
-  if (lookup_data(hypercube_data_d, gpu_hashmap_async::key_from_cell<N_DIMS>(hc_key), &hypercube_data))
-  {
-    // hypercube not available; write multi-index for stage-2 generation
-    state_hc_keys[i] = hc_key;
+    // Per-thread int32 cell-index overflow tally, accumulated branchlessly into a
+    // register. This is the canonical index computation for the batch (mirrors CPU
+    // Phase 1); the interpolate kernels re-derive the index without counting so cells
+    // are tallied once. Reduced to the device accumulator below only if nonzero — a
+    // warp-coherent, almost-always-not-taken branch, so effectively free on the hot path.
+    int cell_overflows = 0;
+    cell_key_t<N_DIMS> hc_key;
+    for (int d = 0; d < N_DIMS; ++d)
+    {
+      hc_key.idx[d] = get_axis_interval_index_unbounded<value_t>(
+          states_d[state_idx * N_DIMS + d], axis_min_d[d], axis_step_inv_d[d], &cell_overflows);
+    }
+    if (cell_overflows)
+      atomicAdd(&batch_status_d[1], cell_overflows);
+
+    value_t *hypercube_data;
+    if (lookup_data(hypercube_data_d, gpu_hashmap_async::key_from_cell<N_DIMS>(hc_key), &hypercube_data))
+    {
+      // hypercube not available; write multi-index for stage-2 generation
+      state_hc_keys[i] = hc_key;
+      missing = true;
+    }
+    else
+    {
+      // hypercube cached; mark sentinel
+      state_hc_keys[i].idx[0] = INT32_MIN;
+    }
   }
-  else
-  {
-    // hypercube cached; mark sentinel
-    state_hc_keys[i].idx[0] = INT32_MIN;
-  }
+
+  // Count the states with a missing hypercube once per warp. Every lane reaches the
+  // ballot (there is no early return above), so the block size must be a multiple of 32.
+  const unsigned missing_lanes = __ballot_sync(0xffffffffu, missing);
+  if (missing_lanes != 0u && (threadIdx.x & 31u) == 0u)
+    atomicAdd(&batch_status_d[0], __popc(missing_lanes));
 }
 
 template <typename value_t, uint8_t N_DIMS, uint16_t N_OPS, bool FIRST_STAGE>
@@ -643,16 +613,4 @@ __global__ void add_hypercubes_to_hashmap(
   if (insert_vector_element(hypercube_data_d, k,
                             &new_hypercube_data_d[hypercube_index * N_OPS * NV], vector_index))
     return;
-}
-
-template <typename value_t, uint8_t N_DIMS, uint16_t N_OPS>
-__global__ void check_if_hashmap_expansion_needed(
-    const float threshold,
-    gpu_hashmap_async::gpu_hash_map<value_t, (1 << N_DIMS) * N_OPS> *hypercube_data_d,
-    int *expansion_needed)
-{
-  if (hypercube_data_d->occupied > hypercube_data_d->size * threshold)
-    *expansion_needed = 1;
-  else
-    *expansion_needed = 0;
 }

@@ -24,6 +24,18 @@ foreach(CPPFILE ${CPPFILES})
     opendarts_compiler_flags
   )
 
+  # timer_node.h calls cudaEventCreate()/cudaDeviceSynchronize() inline under
+  # WITH_GPU, so every test that includes it needs the CUDA runtime even when
+  # the test itself is pure host code (1_timer_cpu.cpp contains no CUDA at all
+  # and still fails to link without this). Other consumers of the header --
+  # darts_interpolation, engines, linear_solvers -- already link CUDA::cudart;
+  # these test targets were the only ones that did not.
+  if (CUDA)
+    target_link_libraries(${TARGETNAME}
+      CUDA::cudart
+    )
+  endif()
+
   target_include_directories(${TARGETNAME}
     PRIVATE
       ${CMAKE_SOURCE_DIR}/interpolation/include

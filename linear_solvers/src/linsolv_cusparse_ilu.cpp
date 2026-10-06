@@ -17,6 +17,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <cmath>
 
 #include <cuda_runtime.h>
 
@@ -265,6 +266,11 @@ namespace opendarts
     linsolv_cusparse_ilu<N_BLOCK_SIZE>::~linsolv_cusparse_ilu()
     {
       free_device_resources();
+      if (cublas_handle_)
+      {
+        cublasDestroy(cublas_handle_);
+        cublas_handle_ = nullptr;
+      }
     }
 
     template <uint8_t N_BLOCK_SIZE>
@@ -400,6 +406,18 @@ namespace opendarts
       cusparseCreateBsrsv2Info(&info_L);
       cusparseCreateBsrsv2Info(&info_U);
 
+      // Pivot-boost configuration (see linsolv_cusparse_ilu.hpp). cublas is
+      // used only for the one-call max|a_ij| that sets the absolute threshold.
+      if (const char *boost_env = std::getenv("DARTS_ILU0_BOOST"))
+      {
+        const double v = atof(boost_env);
+        numeric_boost_enabled = (v != 0.0);
+        if (v > 0.0)
+          numeric_boost_rel_val = v;
+      }
+      if (numeric_boost_enabled && !cublas_handle_)
+        cublasCreate(&cublas_handle_);
+
       // step 3: query and allocate the work buffer.
       if (single_precision)
       {
@@ -487,7 +505,38 @@ namespace opendarts
         }
       }
 
-      // step 5: M = L * U.
+      // step 5: M = L * U. Boost degenerate pivots first so that a singular
+      // diagonal block (the exhausted-mineral row) yields a usable, merely
+      // under-correcting factorisation instead of aborting the linear solve
+      // and triggering a timestep cut -- see the header for the rationale.
+      if (numeric_boost_enabled && !single_precision && cublas_handle_)
+      {
+        int imax = 0;
+        const int n_values = nnzb * N_BLOCK_SIZE * N_BLOCK_SIZE;
+        double scale = 0.0;
+        if (cublasIdamax(cublas_handle_, n_values, values_d_ilu, 1, &imax)
+                == CUBLAS_STATUS_SUCCESS && imax > 0)
+          cudaMemcpy(&scale, values_d_ilu + (imax - 1), sizeof(double),
+                     cudaMemcpyDeviceToHost);
+        scale = std::fabs(scale);
+        if (scale > 0.0)
+        {
+          // ABSOLUTE tolerance: only an exact zero may be boosted. Scaling it
+          // by max|a_ij| would catch ordinary pivots whenever the matrix has a
+          // wide dynamic range -- see the header.
+          numeric_boost_tol_ = numeric_boost_abs_tol;
+          numeric_boost_val_ = numeric_boost_rel_val * scale;
+          cusparseDbsrilu02_numericBoost(handle, info_M, 1, &numeric_boost_tol_,
+                                         &numeric_boost_val_);
+          if (!numeric_boost_reported_)
+          {
+            numeric_boost_reported_ = true;
+            printf("cusparse ILU(0): pivot boosting on (|a|max %.3e, tol %.3e, "
+                   "boost %.3e); set DARTS_ILU0_BOOST=0 to disable\n",
+                   scale, numeric_boost_tol_, numeric_boost_val_);
+          }
+        }
+      }
       if (single_precision)
         cusparseSbsrilu02(handle, dir, mb, nnzb, descr_M, values_d_ilu_sfp,
           d_bsrRowPtr, d_bsrColInd, N_BLOCK_SIZE, info_M, policy_M, pBufferM);
@@ -508,7 +557,8 @@ namespace opendarts
         {
           numerical_zero = pivot_row;
           printf("cusparse ILU(0): zero pivot at block row %d -- "
-                 "factorisation unusable\n", pivot_row);
+                 "factorisation unusable (pivot boosting %s)\n", pivot_row,
+                 numeric_boost_enabled ? "on" : "off");
           this->timer_setup->node["ILU(0)"].stop();
           return -1;
         }

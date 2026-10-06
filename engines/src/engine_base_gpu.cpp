@@ -342,6 +342,9 @@ int engine_base_gpu::solve_linear_equation()
 		return 1;
 	}
 
+	// dX_d is the solver's initial guess as well as its output: start from zero
+	cudaMemset(dX_d, 0, sizeof(value_t) * (size_t)dX.size());
+
 	timer->node["linear solver solve"].start_gpu();
 	r_code = linear_solver->solve(RHS_d, dX_d);
 	timer->node["linear solver solve"].stop_gpu();

@@ -95,6 +95,12 @@ public:
   uint8_t get_n_comps() const override { return NC; };
   uint8_t get_z_var_idx() const override { return Z_VAR; };
 
+  // A gradient (chi) operator has been seen in a mass row / in the energy row of some reservoir block: the
+  // diffusion / conduction block of the assembly is only skipped for rows that never had one (exact zeros).
+  // Sticky: once seen, the row keeps the full assembly path and is not scanned again.
+  bool grad_mass_seen = false;
+  bool grad_energy_seen = false;
+
   // If enthalpy is the primary var, the following axis bounds are also used
   value_t min_axis_temp;  // OBL axis min for temperature
   value_t max_axis_temp;  // OBL axis max for temperature

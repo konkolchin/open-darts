@@ -377,15 +377,33 @@ namespace opendarts
           for (opendarts::config::index_t in_block_value_idx = 0; in_block_value_idx < this->b_sqr;
                in_block_value_idx++)
           {
-            output_file << "\t" << std::setprecision(16) << std::fixed << this->values[in_row_block_idx * this->b_sqr + in_block_value_idx];
+            // Round-trip precision, and SCIENTIFIC rather than fixed: with
+            // std::fixed and 16 decimals every entry below ~1e-16 was written
+            // as 0.0000000000000000. Reservoir Jacobians routinely carry rows
+            // that small (a mineral balance's pressure derivative runs to
+            // 1e-20 here), so the dump silently destroyed exactly the
+            // structure a conditioning analysis needs.
+            // NOTE: under std::scientific the precision counts digits AFTER the
+            // point, so round-tripping a mat_float needs max_digits10 - 1 (16
+            // for a double, i.e. 17 significant digits). Asking for
+            // max_digits10 here would emit one extra, meaningless digit.
+            output_file << "\t" << std::scientific
+                        << std::setprecision(
+                             std::numeric_limits<opendarts::config::mat_float>::max_digits10 - 1)
+                        << this->values[in_row_block_idx * this->b_sqr + in_block_value_idx];
           }
         }
       }
 
       output_file << "\n"
                   << "// END of Values\n";
+      // Terminate the file with a newline, like every other writer here does.
+      // Without it the dump is the only file in tests/cpp/data that does not end
+      // in one, so pre-commit's end-of-file-fixer rewrites the checked-in
+      // reference and the byte comparison then fails with nothing but
+      // "Different number of lines in files!".
       output_file << "\n"
-                  << "// END of File";
+                  << "// END of File\n";
 
       // Close the file
       output_file.close();

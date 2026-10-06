@@ -73,6 +73,12 @@ void pybind_engine_super_gpu(py::module &m)
 
   recursive_exposer_nc_np_t<engine_super_gpu_exposer, py::module, 1, MAX_NC, 3, true> re5;
   re5.expose(m);
+
+  // GPU counterpart of the 4-phase thermal CPU engines (engine_super_cpu2_4_t,
+  // engine_super_cpu3_4_t): CO2-H2O with aqueous, gaseous CO2, liquid CO2 and
+  // hydrate (or ice), optionally with the kinetic hydrate pseudo-component
+  recursive_exposer_nc_np_t<engine_super_gpu_exposer, py::module, 2, 3, 4, true> re6;
+  re6.expose(m);
 }
 
 #endif //PYBIND11_ENABLED

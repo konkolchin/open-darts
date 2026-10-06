@@ -17,6 +17,8 @@
 
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
+#include <string>
 #include <cstring>
 #include <vector>
 
@@ -40,6 +42,17 @@ namespace opendarts
 
     // Linear-solve counter, kept for parity with the reference source.
     static int lin_it = 0;
+
+    // DARTS_CPR_DUMP_DIR=<dir> writes, once per setup, the coarse pressure
+    // system CPR actually hands AMG:
+    //   <dir>/cpr_Ap_<k>.csr   the scalar pressure matrix A_p
+    //   <dir>/cpr_w_<k>.vec    the True-IMPES weights D_ps * inv(D_ss), row major
+    //   <dir>/cpr_mults_<k>.vec the per-row multiplier applied to A_p and to the
+    //                           restricted residual
+    // The engine's own print_linear_system dumps the BLOCK Jacobian, which says
+    // nothing about the operator the preconditioner is built from -- and that
+    // operator is where CPR's behaviour is decided.
+    static const char *cpr_dump_dir = std::getenv("DARTS_CPR_DUMP_DIR");
 
     // In-place block inversion (ADGPRS routine): inverts the n_block_size x
     // n_block_size dense block D with full pivoting. Returns false on a
@@ -157,7 +170,8 @@ namespace opendarts
     template <uint8_t n_block_size>
     __global__ void cpr_setup_kernel(index_t n_rows, index_t *rows, index_t *diags, index_t *block_p_jac_idx,
       value_t *vals, value_t *p_vals,
-      value_t *D_ps_ss, value_t *rhs_mults, index_t *inverse_fail_counter, value_t *diag_acc = 0)
+      value_t *D_ps_ss, value_t *rhs_mults, index_t *inverse_fail_counter, int normalize_rows,
+      value_t *diag_acc = 0)
     {
       index_t i = threadIdx.x + blockIdx.x * blockDim.x;
 
@@ -334,23 +348,39 @@ namespace opendarts
 #endif
         }
       }
-      if (p_vals[j1] < 0)
+      // No dominance guard here: this diagonal-first kernel stores the row as
+      // {diagonal, off-diagonals} rather than in column order, and it is
+      // unreachable in the open-source build (init() forces
+      // p_solver_requires_diag_first = 0), so the guard would be untestable.
+      // See cpr_setup_kernel_no_first_diag for it.
+      //
+      // See linsolv_cpr_gpu.hpp (normalize_pressure_rows): sign only by
+      // default; full diagonal normalisation only where an upstream transform
+      // has given the rows an arbitrary scale to divide back out.
+      const value_t pressure_diagonal = p_vals[j1];
+      value_t row_scale = pressure_diagonal < 0 ? -1 : 1;
+      if (normalize_rows && pressure_diagonal != 0)
       {
-        rhs_mults[i] = -1;
-        for (index_t j = j1; j < j2; ++j)
-        {
-          p_vals[j] *= -1;
-        }
+        const value_t inv = 1 / pressure_diagonal;
+        // reject a scale that would overflow the row rather than the scale
+        // itself: |1/d| can be finite while |a_ij / d| is not.
+        value_t row_max = 0;
+        for (index_t entry = j1; entry < j2; ++entry)
+          row_max = fmax(row_max, fabs(p_vals[entry]));
+        if (isfinite(inv) && isfinite(row_max * inv))
+          row_scale = inv;
       }
-      else
-        rhs_mults[i] = 1;
+      rhs_mults[i] = row_scale;
+      for (index_t entry = j1; entry < j2; ++entry)
+        p_vals[entry] *= row_scale;
     }
 
     // CPR setup kernel variant that does not assume a diagonal-first layout.
     template <uint8_t n_block_size>
     __global__ void cpr_setup_kernel_no_first_diag(index_t n_rows, index_t *rows, index_t *diags,
       index_t *block_p_jac_idx, value_t *vals, value_t *p_vals,
-      value_t *D_ps_ss, value_t *rhs_mults, index_t *inverse_fail_counter, value_t *diag_acc = 0)
+      value_t *D_ps_ss, value_t *rhs_mults, index_t *inverse_fail_counter, int normalize_rows,
+      value_t *diag_acc = 0)
     {
       index_t i = threadIdx.x + blockIdx.x * blockDim.x;
 
@@ -517,16 +547,25 @@ namespace opendarts
 #endif
         }
       }
-      if (p_vals[jd] < 0)
+      // See linsolv_cpr_gpu.hpp (normalize_pressure_rows): sign only by
+      // default; full diagonal normalisation only where an upstream transform
+      // has given the rows an arbitrary scale to divide back out.
+      const value_t pressure_diagonal = p_vals[jd];
+      value_t row_scale = pressure_diagonal < 0 ? -1 : 1;
+      if (normalize_rows && pressure_diagonal != 0)
       {
-        rhs_mults[i] = -1;
-        for (index_t j = j1; j < j2; ++j)
-        {
-          p_vals[j] *= -1;
-        }
+        const value_t inv = 1 / pressure_diagonal;
+        // reject a scale that would overflow the row rather than the scale
+        // itself: |1/d| can be finite while |a_ij / d| is not.
+        value_t row_max = 0;
+        for (index_t entry = j1; entry < j2; ++entry)
+          row_max = fmax(row_max, fabs(p_vals[entry]));
+        if (isfinite(inv) && isfinite(row_max * inv))
+          row_scale = inv;
       }
-      else
-        rhs_mults[i] = 1;
+      rhs_mults[i] = row_scale;
+      for (index_t entry = j1; entry < j2; ++entry)
+        p_vals[entry] *= row_scale;
     }
 
     // Restrict the full RHS B to the pressure RHS P_B.
@@ -601,7 +640,7 @@ namespace opendarts
 
     // C^T restriction: the transpose of cpr_solve_prolongate_kernel's
     // pressure-slot injection is a plain pressure-slot extraction (no weights,
-    // no sign mults -- those belong to the transposed reduction, below).
+    // no row scales -- those belong to the transposed reduction, below).
     template <uint8_t n_block_size>
     __global__ void cpr_solve_restrict_t_kernel(index_t n_rows, value_t *B, value_t *P_B)
     {
@@ -614,8 +653,8 @@ namespace opendarts
     }
 
     // W^T D_m prolongation: the transpose of cpr_solve_reduce_kernel's
-    // weighted reduction R = D_m W. The stored P carries the row sign
-    // normalisation D_m (setup kernel flips whole rows), so the true
+    // weighted reduction R = D_m W. The stored P carries the row diagonal
+    // normalisation D_m, so the true
     // (P_orig^T)^{-1} solution is D_m y for the y computed on the stored P^T;
     // the mults therefore multiply on the prolongation side. Mirrors the
     // reduce kernel's slot/macro structure exactly.
@@ -958,15 +997,61 @@ namespace opendarts
       if (p_solver_requires_diag_first)
       {
         cpr_setup_kernel<n_block_size><<<grid_size, setup_block_size>>>(n_rows, rows, diags,
-          block_p_jac_idx, vals, p_vals, D_ps_ss, rhs_mults, inverse_fail_counter);
+          block_p_jac_idx, vals, p_vals, D_ps_ss, rhs_mults, inverse_fail_counter,
+          normalize_pressure_rows);
       }
       else
       {
         cpr_setup_kernel_no_first_diag<n_block_size><<<grid_size, setup_block_size>>>(n_rows, rows,
-          diags, block_p_jac_idx, vals, p_vals, D_ps_ss, rhs_mults, inverse_fail_counter, diag_acc);
+          diags, block_p_jac_idx, vals, p_vals, D_ps_ss, rhs_mults, inverse_fail_counter,
+          normalize_pressure_rows, diag_acc);
       }
       int inverse_fail_counter_host;
       cudaMemcpy(&inverse_fail_counter_host, inverse_fail_counter, sizeof(index_t), cudaMemcpyDeviceToHost);
+
+      if (cpr_dump_dir)
+      {
+        static int dump_counter = 0;
+        const std::string stem =
+            std::string(cpr_dump_dir) + "/cpr_" + std::to_string(dump_counter++);
+        std::vector<value_t> host_vals(A_->n_non_zeros);
+        cudaMemcpy(host_vals.data(), p_vals, sizeof(value_t) * A_->n_non_zeros,
+            cudaMemcpyDeviceToHost);
+        std::vector<value_t> host_w((std::size_t)n_rows * (n_block_size - 1));
+        cudaMemcpy(host_w.data(), D_ps_ss, sizeof(value_t) * host_w.size(),
+            cudaMemcpyDeviceToHost);
+        std::vector<value_t> host_mults(n_rows);
+        cudaMemcpy(host_mults.data(), rhs_mults, sizeof(value_t) * n_rows,
+            cudaMemcpyDeviceToHost);
+        const index_t *rp = A_->get_rows_ptr();
+        const index_t *ci = A_->get_cols_ind();
+        FILE *fm = fopen((stem + "_Ap.csr").c_str(), "w");
+        if (fm)
+        {
+          fprintf(fm, "%d %d\n", (int)n_rows, (int)A_->n_non_zeros);
+          for (index_t r = 0; r <= n_rows; ++r)
+            fprintf(fm, "%d\n", (int)rp[r]);
+          for (index_t j = 0; j < A_->n_non_zeros; ++j)
+            fprintf(fm, "%d %.17g\n", (int)ci[j], host_vals[j]);
+          fclose(fm);
+        }
+        FILE *fw = fopen((stem + "_w.vec").c_str(), "w");
+        if (fw)
+        {
+          for (std::size_t k = 0; k < host_w.size(); ++k)
+            fprintf(fw, "%.17g\n", host_w[k]);
+          fclose(fw);
+        }
+        FILE *fr = fopen((stem + "_mults.vec").c_str(), "w");
+        if (fr)
+        {
+          for (index_t r = 0; r < n_rows; ++r)
+            fprintf(fr, "%.17g\n", host_mults[r]);
+          fclose(fr);
+        }
+        printf("CPR: dumped %s_{Ap.csr,w.vec,mults.vec} (%d rows, %d nnz)\n",
+            stem.c_str(), (int)n_rows, (int)A_->n_non_zeros);
+      }
 
       if (inverse_fail_counter_host)
       {
@@ -1284,7 +1369,7 @@ namespace opendarts
         cudaDeviceSynchronize();
       }
 
-      // Step 5: X += W^T (D_m P_X) -- weights + sign mults on the
+      // Step 5: X += W^T (D_m P_X) -- weights + row scales on the
       // prolongation side (exact transpose of the forward weighted reduction).
       grid = (n_rows + solve_prolongate_block_size - 1) / solve_prolongate_block_size;
       cpr_solve_prolongate_t_kernel<n_block_size><<<grid, solve_prolongate_block_size>>>(n_rows, X, P_X,

@@ -80,6 +80,11 @@ The nonlinear default is a `NewtonSolver` with:
 | `chop` | `ChopSpec(mode='local', factor=0.1, log_transform=False)` | update limiting; `mode` is `'local'`, `'global'` or `None`, `factor` is the max composition change per iteration |
 | `on_linear_nonconvergence` | `'accept'` | policy for a linear solve that exhausted its budget on a usable iterate: `'accept'` the inexact-Newton step or `'cut'` the timestep (see below) |
 | `obl_bounds` | `OBLBoundsSpec(mode=None)` | optional per-axis clamping to the OBL box; `mode='obl_axes'` with `axis_min` / `axis_max` |
+| `max_residual` | `None` | divergence guard: fail the step when the reservoir residual exceeds this absolute value (see below) |
+| `max_residual_growth` | `None` | divergence guard: fail the step when the residual exceeds this factor × the smallest residual of the timestep so far |
+| `residual_growth_floor` | `None` (= `100 × tolerance`) | residuals at or below this are never judged by growth |
+| `max_update_ratio` | `None` | divergence guard: bound on `max|dX_i| / ts_control.eta[i]` of the *proposed* update; scalar or one entry per state variable (`inf`/`None` exempts one) |
+| `max_hypercube_jump` | `None` | divergence guard: bound on the number of OBL hypercubes any block may hop along an axis in one update; scalar or per variable |
 
 `NewtonSolver` also takes `pre_routines`, `post_routines` and `fallbacks` (all empty by
 default) for user procedures around each nonlinear iteration.
@@ -105,6 +110,69 @@ historical behaviour of MGR. With one policy in force, different linear solvers 
 same Newton trajectory on the same problem, which makes solver comparisons
 like-for-like. Non-converged solves are marked ` NC` in the per-iteration log line and
 counted in `nonlinear_solver.status.n_linear_nonconverged`.
+
+### Divergence guard of the Newton iteration
+
+A Newton iteration that has left its basin of attraction does not stop by itself: every
+further iterate costs a full assembly — with adaptive OBL that means supporting-point
+evaluations (flashes, PHREEQC calls, ...) at states nobody will ever visit — and a linear
+solve on a Jacobian that means nothing, until `max_iterations` is spent. On a reactive
+transport case this was measured as 99 % of the wall time spent inside the few timesteps
+that eventually failed, and five single garbage iterates producing 83 % of a 14 M-point
+supporting-point cache.
+
+The guard fails the timestep as soon as the residual history or the *proposed* update says
+the iteration has diverged. All thresholds are off (`None`) by default; set them next to
+`tolerance` and `max_iterations`:
+
+```python
+self.nonlinear_solver = NewtonSolver(
+    tolerance=1e-4, max_iterations=10,
+    max_residual=1e3,                    # absolute residual bound
+    max_residual_growth=1e3,             # x the smallest residual of the timestep
+    max_update_ratio=[None, 4, 4, 4, 4], # per variable, in units of ts_control.eta
+    max_hypercube_jump=[None, 100, 100, 100, 100],
+)
+```
+
+- **Residual side**, judged before each linear solve: `max_residual` (absolute) and
+  `max_residual_growth`, measured against the *smallest* residual seen in the timestep so
+  far — a healthy early transient may go 0.16 → 28 → 7.6 → 0.46 → 2e-3, so the previous
+  iterate is not the reference. Residuals at or below `residual_growth_floor` (default
+  100 × `tolerance`) are not judged: the ratio of two tiny residuals is noise. A residual
+  below `tolerance` is always accepted first.
+- **Update side**, judged after the linear solve and *before* the update is applied — the
+  assembly it would trigger is the cost that must not be paid: `max_update_ratio` bounds
+  the change of each variable in any block relative to the per-timestep change target
+  `ts_control.eta[i]` (exempt a variable with `inf`/`None`, e.g. the pressure when a
+  boundary switch moves it by a fixed amount whatever `dt` is); `max_hypercube_jump`
+  bounds the number of OBL hypercubes (lattice from `physics.axes_origin` / `axes_step`)
+  any block may hop along an axis, since every newly entered hypercube costs up to
+  `2**n_vars` supporting-point evaluations. The *raw* Newton direction is judged, not
+  the update the engine applies after clamping it into the `obl_bounds` box: a block
+  that wants to leave the box is parked on its face by the clamp, the hop then looks
+  small and the divergence goes unnoticed. Measured on the calcite model, with the same
+  code either way: judging the clamped update failed 17 % of the timestep attempts,
+  judging the raw one 2.6 %.
+
+A guard abort takes the ordinary failed-step path (engine rollback, timestep cut,
+`stats.n_timesteps_wasted`); the reason is in `status.divergence_reason` and the count in
+`stats.n_divergence_aborts`. The linear-solver status stays `0`, so adaptive
+linear-solver switching sees a *nonlinear* failure, which it is. Set the thresholds from a
+measured envelope of your model (healthy maximum vs. diverging minimum of each signal);
+the values above stem from a calcite-dissolution wellbore case where the guard reduced a
+failed attempt from minutes (and millions of supporting points) to 0.3 s.
+`MechanicsNewtonSolver` runs its own loop and ignores these fields.
+
+**Timestep regrowth after a failure.** The plain controller retries at `dt / dt_mult` and,
+once that is accepted, regrows by `dt_mult` straight back into the size that just failed —
+a fail/accept alternation. `ts_control.regrowth_hold_steps = N` (default 0 = off) keeps the
+next `N` accepted steps below `ts_control.regrowth_cap × dt_failed` (default 0.75) and lets
+them grow by at most `ts_control.regrowth_factor` (default 1.25) per accepted step, i.e.
+relative to the step just accepted (a controller-driven decrease lowers the reference too;
+the last step of a `run()` interval, clipped to the stop time, does not). `dt_max` itself is
+never modified — `run()` applies the bound through `ts_control.effective_dt_max()` — so a
+model may change `ts_control.dt_max` at any time.
 
 ## Solvers and preconditioners
 
@@ -254,7 +322,12 @@ inherited three plus local Schur elimination.
 
 `schur_elim_count` (`0` = off) statically condenses that many cell-local equations before
 the solve; `schur_elim_rows` / `schur_elim_cols` name the eliminated equation rows and
-unknown columns and must have `schur_elim_count` entries.
+unknown columns and must have `schur_elim_count` entries. Combine it with `block_row_perm`
+(pairs in the original numbering): the reduced system then keeps the permuted order, its
+pressure reference equation is the retained flowing balance, and the chain uses the
+default sign-only pressure scaling. Without the permutation the reduced reference row has
+an arbitrary scale and the chain normalizes every pressure row by its diagonal, which costs
+AMG its effectiveness.
 
 
 `GMRESSolverSpec` is the only spec exposing a `prec` field, so it is the composition point

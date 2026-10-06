@@ -14,6 +14,8 @@
 // *************************************************************************
 
 #include <fstream>
+#include <iomanip>
+#include <limits>
 
 #include "block_csr_io.hpp"
 
@@ -26,6 +28,16 @@ namespace opendarts
       std::ofstream out(filename);
       if (!out)
         return 1;
+
+      // Round-trip precision. The default ostream precision is 6 significant
+      // digits, which is not enough to read a Jacobian back and say anything
+      // quantitative about its conditioning -- and this is the writer the GPU
+      // engine's print_linear_system actually reaches, since the open-source
+      // Jacobian is a block_csr_matrix.
+      // The default float format counts SIGNIFICANT digits, so max_digits10 is
+      // exactly right here (csr_matrix's csr writer uses std::scientific and so
+      // needs max_digits10 - 1 for the same 17 significant digits).
+      out << std::setprecision(std::numeric_limits<block_csr_matrix::mat_float>::max_digits10);
 
       const int nb = matrix.block_size();
       const block_csr_matrix::index_t n_block_rows = matrix.n_block_rows();

@@ -63,7 +63,7 @@ int test_csr_format_string_input()
   }
 
   // Compare the generated output to the reference output
-  files_are_equal = opendarts::linear_solvers::testing::compare_files(output_filename,
+  files_are_equal = opendarts::linear_solvers::testing::compare_matrix_files(output_filename,
       reference_filename); // check if equal to reference
 
   if (files_are_equal)

@@ -20,7 +20,10 @@
 
 #ifdef WITH_GPU
 
+#include <limits>
+
 #include <cusparse.h>
+#include <cublas_v2.h>
 
 #include "data_types.hpp"
 #include "csr_matrix.hpp"
@@ -145,6 +148,43 @@ namespace opendarts
       opendarts::linear_solvers::csr_matrix_base *A_matrix = nullptr;
 
       double *values_d_ilu;
+
+      // Numeric pivot boosting (DARTS_ILU0_BOOST=0 disables, or set a relative
+      // magnitude). An ILU(0) pivot of exactly zero makes the triangular
+      // factors unusable and would abort the whole linear solve, which the
+      // engine reports as a failed step: the timestep is cut, re-assembled at a
+      // new state, and the adaptive OBL interpolator then asks PHREEQC for fresh
+      // supporting points. The singular pivot is the cell-local mineral row,
+      // which is exactly the row Schur elimination removes -- so runs without
+      // it are the ones affected.
+      //
+      // cusparseXbsrilu02_numericBoost replaces any pivot below `tol` with
+      // `boost_val`, keeping the factorisation finite and the solve alive. The
+      // scale is taken from the matrix itself (max |a_ij|, one cublasIdamax per
+      // setup) because the API takes absolute, not relative, thresholds. The
+      // boost is deliberately large: for a preconditioner an
+      // over-sized pivot merely under-corrects that unknown, while an
+      // under-sized one amplifies it. Boosting the degenerate mineral row
+      // therefore means "do not try to correct the mineral unknown where the
+      // mineral is gone".
+      //
+      // The tolerance must be extremely conservative: the unpivoted LU pivots
+      // of healthy diagonal blocks span tens of orders of magnitude without
+      // being zero, so a threshold relative to max|a_ij| would catch legitimate
+      // pivots and wreck the preconditioner. Only a genuine zero -- what
+      // cusparse actually reports -- may be touched, so the tolerance is
+      // ABSOLUTE (an exact zero or a denormal). A relative tolerance only looks
+      // scale-invariant: its anchor is the largest entry of the WHOLE matrix,
+      // not the local pivot scale.
+      int numeric_boost_enabled = 1;
+      double numeric_boost_abs_tol = std::numeric_limits<double>::min();
+      double numeric_boost_rel_val = 1e-7;    // boost_val = this * max|a_ij|
+      bool numeric_boost_reported_ = false;
+      // Members, not locals: cusparseXbsrilu02_numericBoost takes HOST
+      // POINTERS and they must stay alive until the factorisation runs.
+      double numeric_boost_tol_ = 0.0;
+      double numeric_boost_val_ = 0.0;
+      cublasHandle_t cublas_handle_ = nullptr;
 
       // Jacobi-iterated triangular solves (DARTS_ILU0_JACOBI=k, 0 = exact):
       // apply the exact ILU0 factors approximately with k relaxation sweeps

@@ -80,6 +80,7 @@ public:
     free_device_data(mesh_kin_factor_d);
     free_device_data(mesh_grav_coef_d);
     free_device_data(mesh_cell_spe_d);
+    free_device_data(grad_active_d);
     // ... and the adjoint-assembly buffers (only under opt_history_matching;
     // nullptr-initialised, so freeing when unused is a safe no-op).
     free_device_data(dg_dx_n_temp_values_d);
@@ -130,6 +131,8 @@ public:
   value_t *mesh_kin_factor_d = nullptr; // [n_blocks] kin factor for each block
   value_t *mesh_grav_coef_d = nullptr;  // [n_conns] porosity for each block
   value_t *mesh_cell_spe_d = nullptr;   // [n_blocks] specific potential energy for each block
+  int *grad_active_d = nullptr;         // [2] any reservoir block has a non-zero gradient (chi) operator or
+                                        //     derivative in the mass rows / in the energy row (sticky, set once)
 
   // Device-side adjoint assembly buffers (allocated under opt_history_matching,
   // used by adjoint_gradient_assembly_kernel; see engine_super_gpu.tpp).

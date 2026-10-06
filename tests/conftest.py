@@ -9,6 +9,7 @@ linear-solve return codes -- no compiled simulator needed for the control flow.
 
 from collections import defaultdict
 
+import numpy as np
 import pytest
 
 
@@ -55,6 +56,10 @@ class FakeEngine:
         self.log_transform = 0
         self.newton_update_coefficient = 1.0
         self.opt_history_matching = False
+        # host state / proposed update the divergence guard reads (set by tests
+        # that exercise NewtonSpec.max_update_ratio / max_hypercube_jump)
+        self.X = np.zeros(0)
+        self.dX = np.zeros(0)
         self._res_i = 0
         self._well_i = 0
         self._solve_i = 0
@@ -159,11 +164,15 @@ class FakeModel:
         self.physics = _Physics()
         self.physics.engine = engine
         self.physics.n_vars = n_vars
+        # OBL grid of the fake physics (unit steps from 0) -- tests override
+        self.physics.axes_origin = [0.0] * n_vars
+        self.physics.axes_step = [1.0] * n_vars
 
         class _TimestepControl:
             def __init__(self):
                 self.time = []
                 self.time_step_size = []
+                self.eta = 1e20 * np.ones(n_vars)  # unconstrained, as TimestepControl
 
         self.ts_control = _TimestepControl()
 

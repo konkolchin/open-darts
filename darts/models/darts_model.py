@@ -61,6 +61,10 @@ class DartsModel:
     # Verbosity levels accepted by :meth:`run` (and other ``verbose`` switches).
     # ``verbose`` is an integer; legacy ``bool`` values map to 0/1 transparently
     # (Python ``False``/``True`` are ``0``/``1``), so existing callers are unaffected.
+    # This scale gates what reaches the CONSOLE. The end-of-run TS/NI/LI totals
+    # also go to the darts output stream at every level (SolverStats.log()), so
+    # a redirected run keeps them in its log; their own switch is the logging
+    # level (INFO by default).
     VERBOSE_SILENT = 0  # no per-timestep or end-of-run output
     VERBOSE_DEFAULT = 1  # per-timestep lines + end-of-run statistics (legacy True)
     VERBOSE_TIMERS = 2  # additionally print timers at the end of every run() call
@@ -838,6 +842,11 @@ class DartsModel:
             ``>=2`` (:attr:`VERBOSE_TIMERS`) additionally print timers at the end of
             every ``run()`` invocation (otherwise timers are only printed when
             :meth:`print_timers` is called manually, usually from ``main.py``).
+
+            This is the console side. The end-of-run TS/NI/LI totals also go to
+            the darts output stream at every level, so a run redirected with
+            ``redirect_darts_output()`` keeps them in its log (see
+            :meth:`~darts.nonlinear_solvers.base.SolverStats.log`).
         :type verbose: int
         :param save_well_data: if True save states of well blocks at every time step to 'well_data.h5', default is True
         :type save_well_data: bool
@@ -874,12 +883,15 @@ class DartsModel:
         stop_time = t + days
 
         # same logic as in engine.run
+        clipped = False  # the attempt's dt was shortened to end exactly at stop_time
         if fabs(t) < 1e-15 or not hasattr(self, "prev_dt"):
             dt = min(ts_control.dt_first, days)
         elif restart_dt > 0.0:
             dt = restart_dt
         else:
-            dt = min(self.prev_dt * ts_control.dt_mult, days, ts_control.dt_max)
+            dt = min(self.prev_dt * ts_control.dt_mult, ts_control.effective_dt_max())
+            clipped = dt > days
+            dt = min(dt, days)
 
         self.prev_dt = dt
 
@@ -905,6 +917,7 @@ class DartsModel:
             xn = np.array(self.physics.engine.Xn, copy=True)[: nb * nc]
             overhead.stop()
             converged = self.run_timestep(dt, t, verbose)
+            ts_control.notify_result(dt, converged, clipped=clipped)
             self.linear_solver._maybe_switch_linear_solver(converged, dt=dt)
 
             overhead.start()
@@ -930,12 +943,13 @@ class DartsModel:
                         f"#{ts_counter:d}\tT={t:3g}\tDT={dt:2g}\tNI={self.nonlinear_solver.status.n_newton:d}\tLI={self.nonlinear_solver.status.n_linear:d}\tDT_MULT={dt_mult_new:3.3g}\tdX={max_dx_str}"
                     )
 
-                dt = min(dt * dt_mult_new, ts_control.dt_max)
+                dt = min(dt * dt_mult_new, ts_control.effective_dt_max())
 
                 if np.fabs(t + dt - stop_time) < ts_control.dt_min:
                     dt = stop_time - t
 
-                if t + dt > stop_time:
+                clipped = t + dt > stop_time
+                if clipped:
                     dt = stop_time - t
                 else:
                     self.prev_dt = dt
@@ -962,8 +976,14 @@ class DartsModel:
 
             else:
                 dt /= ts_control.dt_mult
+                clipped = False
                 if verbose:
                     print(f"Cut timestep to {dt:2.10f}")
+                    if ts_control.regrowth_hold_steps > 0:
+                        print(
+                            f"dt regrowth limited: <= {ts_control.effective_dt_max():.4g} "
+                            f"for the next {ts_control.regrowth_hold_steps} accepted steps"
+                        )
                 if dt <= ts_control.dt_min:
                     overhead.stop()  # keep the bracket balanced before the assert aborts
                 assert dt > ts_control.dt_min, (
@@ -1006,12 +1026,16 @@ class DartsModel:
             self.physics.write_cache()
             self.timer.node["cache I/O"].stop()
 
+        # The cumulative totals of every run() invocation go to the darts output
+        # stream whatever `verbose` is: a redirected run keeps its log on that
+        # stream, and the log is what a finished (or crashed) run is read back
+        # from, while print() writes to Python's stdout, which no redirect
+        # captures. The console copy stays gated on `verbose` -- in a
+        # redirected run the two land in different places, in an unredirected one
+        # both are the terminal, so the line is then said twice.
+        self.nonlinear_solver.stats.log()
         if verbose:
-            print(
-                f"----- TS = {self.nonlinear_solver.stats.n_timesteps_total:d}({self.nonlinear_solver.stats.n_timesteps_wasted:d}), "
-                f"NI = {self.nonlinear_solver.stats.n_newton_total:d}({self.nonlinear_solver.stats.n_newton_wasted:d}), "
-                f"LI = {self.nonlinear_solver.stats.n_linear_total:d}({self.nonlinear_solver.stats.n_linear_wasted:d}) -----"
-            )
+            self.nonlinear_solver.stats.print()
 
         # At higher verbosity, print the timer breakdown at the end of every run()
         # invocation (the default behaviour only prints timers when print_timers() is

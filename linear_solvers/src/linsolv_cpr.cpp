@@ -497,11 +497,6 @@ namespace opendarts
         }
       }
 
-      // Row sign normalisation (default rhs_mults parity): flip rows whose
-      // pressure diagonal is negative so the AMG's M-matrix-oriented
-      // coarsening/smoothing heuristics see a positive diagonal. The same
-      // +-1 multiplier is applied to the restricted residual on the forward
-      // path and to the prolonged solution on the transposed path.
       rhs_mults_.assign(static_cast<std::size_t>(n_block_rows), 1.0);
       for (index_t i = 0; i < n_block_rows; ++i)
       {
@@ -512,12 +507,24 @@ namespace opendarts
             diag_val = ap_vals[jb];
             break;
           }
-        if (diag_val < 0.0)
+        // See set_pressure_row_normalisation: sign only by default; full
+        // diagonal normalisation only where an upstream transform has given
+        // the rows an arbitrary scale to divide back out.
+        mat_float row_scale = diag_val < 0.0 ? -1.0 : 1.0;
+        if (normalize_pressure_rows_ && diag_val != 0.0)
         {
-          for (index_t jb = rows[i]; jb < rows[i + 1]; ++jb)
-            ap_vals[jb] = -ap_vals[jb];
-          rhs_mults_[i] = -1.0;
+          const mat_float inv = 1.0 / diag_val;
+          // reject a scale that would overflow the row rather than the scale
+          // itself: |1/d| can be finite while |a_ij / d| is not.
+          mat_float row_max = 0.0;
+          for (index_t entry = rows[i]; entry < rows[i + 1]; ++entry)
+            row_max = std::max(row_max, std::abs(ap_vals[entry]));
+          if (std::isfinite(inv) && std::isfinite(row_max * inv))
+            row_scale = inv;
         }
+        for (index_t entry = rows[i]; entry < rows[i + 1]; ++entry)
+          ap_vals[entry] *= row_scale;
+        rhs_mults_[i] = row_scale;
       }
 
       Ap_->n_non_zeros = nnz;
@@ -730,13 +737,15 @@ namespace opendarts
           || cfg->amg_relax_wt != amg_relax_wt_;
       const bool ilu_fill_changed = cfg->ilu_fill_level != ilu_fill_level_;
       const bool amg_budget_changed = cfg->amg_max_iters != amg_max_iters_;
-      const bool weights_changed = cfg->weight_scheme != weight_scheme_;
+      const bool weights_changed = cfg->weight_scheme != weight_scheme_
+          || (cfg->normalize_pressure_rows != 0) != normalize_pressure_rows_;
 
       // Store everything (hot fields become effective at the next
       // setup()/solve() through the stored members).
       amg_max_iters_ = cfg->amg_max_iters;
       ilu_fill_level_ = cfg->ilu_fill_level;
       weight_scheme_ = cfg->weight_scheme;
+      normalize_pressure_rows_ = cfg->normalize_pressure_rows != 0;
       stage2_type_ = cfg->stage2_type;
       eager_adjoint_ = cfg->eager_adjoint;
       set_pressure_amg_options(cfg->amg_coarsen_type, cfg->amg_interp_type,
@@ -1211,7 +1220,7 @@ namespace opendarts
         mat_float acc = 0.0;
         for (int v = 0; v < static_cast<int>(N_BLOCK_SIZE); ++v)
           acc += w[v] * B[static_cast<std::size_t>(i) * N_BLOCK_SIZE + v];
-        // rhs_mults_ carries the A_p row sign normalisation (see
+        // rhs_mults_ carries the A_p row diagonal normalisation (see
         // build_pressure_subsystem): scaling row i of A_p and entry i of the
         // restricted residual identically leaves the pressure solution
         // unchanged.
@@ -1346,10 +1355,10 @@ namespace opendarts
       check_hypre(HYPRE_IJVectorGetValues(amg_T_x_ij_, n_block_rows,
                       row_indices_.data(), x_p),
           "IJVectorGetValues(amg_T_x)");
-      // The stored A_p carries the row sign normalisation D_m (see
+      // The stored A_p carries the row diagonal normalisation D_m (see
       // build_pressure_subsystem): A_p = D_m A_p_orig, so A_p^T = A_p_orig^T
       // D_m and the true transpose solution is z = D_m y for the y computed
-      // above. Apply the +-1 multipliers to recover it.
+      // above. Apply the row multipliers to recover it.
       for (index_t i = 0; i < n_block_rows; ++i)
         x_p[i] *= rhs_mults_[i];
 
