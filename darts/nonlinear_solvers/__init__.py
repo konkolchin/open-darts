@@ -61,6 +61,7 @@ from darts.nonlinear_solvers.base import (
     NonlinearStatus,
     Norm,
     OBLBoundsSpec,
+    RecoverableEvaluationError,
     SolverStats,
     write_to_log,
 )
@@ -86,5 +87,6 @@ __all__ = [
     "MechanicsNewtonSolver",
     "NonlinearStatus",
     "SolverStats",
+    "RecoverableEvaluationError",
     "write_to_log",
 ]

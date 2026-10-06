@@ -166,29 +166,40 @@ class ElementBasedReactiveFlow(PhysicsBase):
             )
 
         # Create actual accumulation and flux interpolator:
+        # NOTE: every create_interpolator call passes region=str(region), exactly as
+        # Compositional.set_interpolators does. The on-disk supporting-point cache
+        # name is built from the evaluator CLASS name plus the shape parameters and
+        # this tag, so without it the regions of a multi-region model -- whose
+        # evaluators are all ReservoirOperators/ConversionOperators/PropertyOperators
+        # of identical shape -- hash to ONE cache file and silently serve each other's
+        # points. Regions differ precisely in their property container (kinetics,
+        # rel perm, ...), so those points are not interchangeable.
         self.acc_flux_itor = {}
         self.comp_itor = {}
         self.property_itor = {}
         for region in self.regions:
             self.acc_flux_itor[region], _ = self.create_interpolator(
                 evaluator=self.reservoir_operators[region],
-                timer_name='reservoir interpolation',
+                timer_name=f'reservoir {region} interpolation',
                 n_ops=self.n_ops,
                 platform=platform,
                 algorithm=itor_type,
                 precision=itor_precision,
+                region=str(region),
                 is_barycentric=is_barycentric,
             )
 
             # ==============================================================================================================
-            # Create initialization & porosity evaluator
+            # Create initialization & porosity evaluator. This and the property interpolator are evaluated only from
+            # host code (initialization, output), never by the engine: keep them on the CPU whatever the platform.
             self.comp_itor[region], n_comp_ops = self.create_interpolator(
                 evaluator=self.initial_operators[region],
                 timer_name=f'comp {region} interpolation',
                 n_ops=len(self.initial_operators[region].props_name),
-                platform=platform,
+                platform='cpu',
                 algorithm=itor_type,
                 precision=itor_precision,
+                region=str(region),
                 is_barycentric=is_barycentric,
             )
             self.n_comp_itor_ops = n_comp_ops
@@ -199,19 +210,21 @@ class ElementBasedReactiveFlow(PhysicsBase):
                 evaluator=self.property_operators[region],
                 timer_name=f'property {region} interpolation',
                 n_ops=len(self.property_operators[region].props_name),
-                platform=platform,
+                platform='cpu',
                 algorithm=itor_type,
                 precision=itor_precision,
+                region=str(region),
                 is_barycentric=is_barycentric,
             )
             self.n_property_itor_ops = n_property_ops
         self.acc_flux_w_itor = self.acc_flux_itor[0]
 
+        # Well-control operators are evaluated on the host, one well state at a time: CPU whatever the platform.
         self.well_ctrl_itor, n_well_ctrl_ops = self.create_interpolator(
             self.well_ctrl_operators,
             n_ops=self.well_ctrl_operators.n_ops,
             timer_name='well controls interpolation',
-            platform=platform,
+            platform='cpu',
             algorithm=itor_type,
             precision=itor_precision,
         )

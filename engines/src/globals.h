@@ -109,6 +109,7 @@ public:
     // set default params
     max_i_linear = 50;
     tolerance_linear = 1e-5;
+    gmres_restart = 50;
 
 #ifdef OPENDARTS_LINEAR_SOLVERS
     linear_type = CPU_SUPERLU;
@@ -123,6 +124,7 @@ public:
     schur_elim_count = 0;
     schur_elim_rows.clear();
     schur_elim_cols.clear();
+    block_row_perm.clear();
 
     finalize_mpi = 1;
 
@@ -131,6 +133,22 @@ public:
 
   index_t max_i_linear;     // maximum number of linear iterations
   value_t tolerance_linear; // tolerance for linear solver
+  int gmres_restart;        // Krylov subspace dimension of the outer restarted GMRES.
+                            // Consumed by the GPU engine solver factory; CPU chains take it
+                            // from GMRESSolverSpec.restart instead.
+                            //
+                            // Restarting discards the accumulated Krylov basis, so GMRES(m)
+                            // only converges once m exceeds the number of outlier eigenvalues
+                            // of the preconditioned operator. Measured on a calcite
+                            // dissolution model (237145 cells, NV=5) at a late, mineral-
+                            // depleted state where CPR stagnates: m=50 and m=75 never reach
+                            // 1e-5 (1000 iterations, residual 5.7e-2 and 8.8e-4), m=100 needs
+                            // 584 iterations / 2.14 s, m=150 needs 144 iterations / 0.70 s.
+                            // 144 < 150, i.e. that run never restarted; m=160 reproduces it
+                            // exactly. Early in the same run 40 iterations suffice and m=50
+                            // and m=150 are indistinguishable (0.2356 s both), so a larger
+                            // value costs GPU memory -- one basis vector is n_cells * NV *
+                            // sizeof(value_t), here 9.49 MB -- but no time when unused.
 
   bool enable_permporo;        // flag enabling transmissibility multiplier in assembly
   value_t sim_eps;             // offset from axes that solution should remain inside
@@ -145,6 +163,20 @@ public:
                                // balances, but the transform is physics-agnostic.)
   std::vector<int> schur_elim_rows;  // preferred eliminated equation rows (length K)
   std::vector<int> schur_elim_cols;  // eliminated unknown columns (length K)
+  std::vector<int> block_row_perm;   // block-local EQUATION order handed to the GPU linear solver
+                               // (empty = off): entry r = original local equation placed in
+                               // local row r, length n_vars. The solver then works on P A x = P b
+                               // (same x). Needed when the first local equation does not couple
+                               // to pressure -- a non-flowing mineral balance: unpivoted block
+                               // ILU(0) then divides by d(mineral)/dp -> 0 and returns updates
+                               // whose TRUE residual is O(1) while GMRES reports 1e-5. The natural
+                               // order is the cyclic shift {n_vars-1, 0, .., n_vars-2}. Measurements
+                               // in linear_solvers/include/linsolv_block_row_perm.hpp. Every block
+                               // row except the well heads (control equations); well bodies carry
+                               // the same balances. Combines with schur_elim_count: the pairs stay in
+                               // the original numbering (translated here), the reduced system keeps
+                               // the permuted order and the Schur chain then uses the sign-only
+                               // pressure scaling of the default chain (see engine_base_gpu.h).
 
   linear_solver_t linear_type;          // Linear solver type
   int linear_print_level;               // Linear solver verbosity (HYPRE print level)

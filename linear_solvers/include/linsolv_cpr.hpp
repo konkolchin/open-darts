@@ -187,6 +187,15 @@ namespace opendarts
        *  proprietary csr_ilu_prec equivalent). */
       void set_stage2_type(int type) { stage2_type_ = type; }
 
+      /** Pressure-row scaling handed to BoomerAMG: false (default) = sign
+       *  only, true = divide each row by its diagonal. Row scaling breaks the
+       *  near-symmetry of a TPFA pressure operator by the neighbour ratio
+       *  d_j/d_i and hurts badly on rough coefficient fields, so it is for
+       *  chains that have already given the rows an arbitrary scale -- block-
+       *  Schur condensation of a cell-local equation -- and nothing else.
+       *  See linsolv_cpr_gpu.hpp for the measurements. */
+      void set_pressure_row_normalisation(bool on) { normalize_pressure_rows_ = on; }
+
     private:
       // Unguarded implementations of the public entry points. The public
       // setup()/solve()/solve_transposed() wrap these in try/catch and
@@ -409,11 +418,11 @@ namespace opendarts
       // Pressure-decoupling weight scheme (see set_weight_scheme): 1 =
       // column-sum True-IMPES (BOS parity, default), 0 = diagonal-block.
       int weight_scheme_ = 1;
-      // Row sign normalisation of A_p (+1 / -1 per row so the pressure
-      // diagonal is positive -- helps AMG's M-matrix-oriented heuristics;
-      // mirrors linsolv_bos_cpr's rhs_mults). Applied to the restricted
-      // residual on the forward path and to the prolonged solution on the
-      // transposed path.
+      // Pressure-row scaling of A_p (see set_pressure_row_normalisation).
+      bool normalize_pressure_rows_ = false;
+      // The per-row multiplier that scaling produced. Applied to the
+      // restricted residual on the forward path and to the prolonged
+      // solution on the transposed path.
       std::vector<opendarts::config::mat_float> rhs_mults_;
       // Column-sum accumulator for the True-IMPES weights (n_rows x N x N).
       std::vector<opendarts::config::mat_float> colsum_;

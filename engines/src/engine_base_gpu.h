@@ -31,6 +31,7 @@
 #endif
 #include "linsolv_mcsgs.hpp"
 #include "linsolv_schur_elim.hpp"
+#include "linsolv_block_row_perm.hpp"
 #ifdef OPENDARTS_GPU_HAS_AMGX
 #include "linsolv_amgx.hpp"
 #include "linsolv_cpr_gpu.hpp"
@@ -50,13 +51,17 @@
 template <uint8_t NV>
 inline opendarts::linear_solvers::linsolv_iface *make_gpu_amgx_cpr_chain(
     int device_num, bool use_bicgstab, std::string &linear_solver_type_str,
-    int amgx_reuse_override = -1)
+    int amgx_reuse_override = -1, bool normalize_pressure_rows = false,
+    int gmres_restart = 0)
 {
   using namespace opendarts::linear_solvers;
   auto *cpr = new linsolv_cpr_gpu<NV>;
   cpr->p_solver_setup_gpu = 1;
   cpr->p_solver_solve_gpu = 1;
   cpr->p_solver_requires_diag_first = 0;
+  // Off for every ordinary chain: see linsolv_cpr_gpu.hpp. Only the local-
+  // elimination wrapper below asks for it.
+  cpr->normalize_pressure_rows = normalize_pressure_rows ? 1 : 0;
   cpr->set_p_system_prec(new linsolv_amgx<1>(device_num, 1, amgx_reuse_override));
   // Stage-2 experiment hook: DARTS_CPR_STAGE2=amgx swaps the exact
   // (latency-bound) block-ILU(0) for a second AMGX instance on the full
@@ -83,6 +88,11 @@ inline opendarts::linear_solvers::linsolv_iface *make_gpu_amgx_cpr_chain(
   }
   auto *gmres = new linsolv_gmres_gpu<NV>();
   gmres->set_prec(cpr);
+  // Krylov dimension of the outer restart cycle. Zero keeps linsolv_gmres_gpu's
+  // own default (50); anything else comes from sim_params::gmres_restart, whose
+  // declaration records the measurements behind the setting.
+  if (gmres_restart > 0)
+    gmres->set_restart(gmres_restart);
   linear_solver_type_str = "GPU_GMRES_CPR_AMGX_ILU";
   return gmres;
 }
@@ -93,7 +103,8 @@ inline opendarts::linear_solvers::linsolv_iface *make_gpu_amgx_cpr_chain(
 template <uint8_t NV, uint8_t KELIM>
 inline opendarts::linear_solvers::linsolv_iface *make_gpu_schur_elim_chain(
     int device_num, bool use_bicgstab, const std::vector<int> &erows,
-    const std::vector<int> &ecols, std::string &tag)
+    const std::vector<int> &ecols, std::string &tag, int gmres_restart = 0,
+    bool normalize_pressure_rows = true)
 {
   auto *wrap = new opendarts::linear_solvers::linsolv_schur_elim<NV, KELIM>(
       /*on_device=*/true, erows, ecols, 0.0);
@@ -102,8 +113,24 @@ inline opendarts::linear_solvers::linsolv_iface *make_gpu_schur_elim_chain(
   // reused AMGX hierarchy (measured: setup failures, wasted Newtons). Disable
   // adaptive hierarchy reuse for THIS chain's AMGX instances only -- other
   // AMGX instances in the process keep the default behaviour.
+  // Condensing a cell-local equation changes the True-IMPES reference
+  // equation, which rescales every pressure row by an arbitrary per-cell
+  // factor (the reduced and full pressure operators are the same operator up
+  // to that factor). Normalising each row by its diagonal divides it back
+  // out; without it AMG saw 32-79% of the rows sign-flipped and the chain
+  // diverged. This is the ONLY chain that wants it.
+  // Only WITHOUT a block_row_perm: the reduced reference equation is then the
+  // first retained balance (the Ca balance in the calcite model), whose scale
+  // varies by orders of magnitude between cells, and dividing each pressure row
+  // by its diagonal is what keeps AMG alive at all. With the permutation the
+  // reference is the retained flowing balance with its physical scale, and the
+  // sign-only scaling of the default chain is the better one by far.
+  // DARTS_CPR_NORMALIZE_ROWS overrides the choice (diagnostic).
+  bool normalize_rows = normalize_pressure_rows;
+  if (const char *env = std::getenv("DARTS_CPR_NORMALIZE_ROWS"))
+    normalize_rows = env[0] && env[0] != '0';
   wrap->set_prec(make_gpu_amgx_cpr_chain<NV - KELIM>(device_num, use_bicgstab, tag,
-      /*amgx_reuse_override=*/0));
+      /*amgx_reuse_override=*/0, normalize_rows, gmres_restart));
   wrap->set_inner_owned(true);  // engine deletes only the top-level solver
   tag += " + SCHUR_ELIM(K=" + std::to_string((int)KELIM) + ")";
   return wrap;
@@ -414,6 +441,24 @@ int engine_base_gpu::init_base(conn_mesh *mesh_, std::vector<ms_well *> &well_li
   {
     // Factory-allocated solvers are engine-owned and deleted in ~engine_base.
     linear_solver_owned = true;
+    // An EXPLICIT request must fail rather than run something else, and it must
+    // fail BEFORE a chain exists: a throw from here leaves linear_solver null, so
+    // a corrected re-init builds the chain the user asked for.
+    if (!params->block_row_perm.empty())
+    {
+#ifdef OPENDARTS_LINEAR_SOLVERS
+      if ((int)params->block_row_perm.size() != (int)N_VARS)
+        throw std::runtime_error("block_row_perm must have n_vars = " + std::to_string((int)N_VARS) +
+            " entries, got " + std::to_string(params->block_row_perm.size()));
+      // Combined with schur_elim_count the Schur pairs, given in the ORIGINAL
+      // equation numbering, are translated into the permuted one below: the
+      // permutation wrapper is the outermost stage, so the Schur wrapper sees
+      // permuted block rows and its reduced system keeps them in that order.
+#else
+      throw std::runtime_error("block_row_perm needs the open-source linear solvers "
+          "(OPENDARTS_LINEAR_SOLVERS); this build cannot honour it");
+#endif
+    }
 #ifdef OPENDARTS_LINEAR_SOLVERS
     // Open-source GPU build: the proprietary bos GMRES/CPR/AMG solvers are
     // stubbed out, so the full linear_type-driven factory below cannot run.
@@ -456,8 +501,22 @@ int engine_base_gpu::init_base(conn_mesh *mesh_, std::vector<ms_well *> &well_li
           // reduced block size (N_VARS-K) as the inner solver. The reduced block
           // must stay >= 2 for the CPR split, so K <= N_VARS-2.
           const int Kelim = params->schur_elim_count;
-          const std::vector<int> &er = params->schur_elim_rows;
+          std::vector<int> er = params->schur_elim_rows;
           const std::vector<int> &ec = params->schur_elim_cols;
+          if (!params->block_row_perm.empty())
+          {
+            // block_row_perm[r] = original equation placed in local row r
+            for (int &row : er)
+            {
+              int found = -1;
+              for (int r = 0; r < (int)params->block_row_perm.size(); ++r)
+                if (params->block_row_perm[r] == row) found = r;
+              if (found < 0)
+                throw std::runtime_error("schur_elim_rows entry " + std::to_string(row) +
+                    " is not an equation of block_row_perm");
+              row = found;
+            }
+          }
           if ((int)er.size() != Kelim || (int)ec.size() != Kelim)
             throw std::runtime_error("schur_elim: schur_elim_rows/cols length must equal "
                 "schur_elim_count (K)");
@@ -466,10 +525,10 @@ int engine_base_gpu::init_base(conn_mesh *mesh_, std::vector<ms_well *> &well_li
           {
             switch (Kelim)
             {
-              case 1: if constexpr (N_VARS >= 3) linear_solver = make_gpu_schur_elim_chain<N_VARS, 1>(device_num, use_bicgstab, er, ec, linear_solver_type_str); break;
-              case 2: if constexpr (N_VARS >= 4) linear_solver = make_gpu_schur_elim_chain<N_VARS, 2>(device_num, use_bicgstab, er, ec, linear_solver_type_str); break;
-              case 3: if constexpr (N_VARS >= 5) linear_solver = make_gpu_schur_elim_chain<N_VARS, 3>(device_num, use_bicgstab, er, ec, linear_solver_type_str); break;
-              case 4: if constexpr (N_VARS >= 6) linear_solver = make_gpu_schur_elim_chain<N_VARS, 4>(device_num, use_bicgstab, er, ec, linear_solver_type_str); break;
+              case 1: if constexpr (N_VARS >= 3) linear_solver = make_gpu_schur_elim_chain<N_VARS, 1>(device_num, use_bicgstab, er, ec, linear_solver_type_str, params->gmres_restart, /*normalize_pressure_rows=*/params->block_row_perm.empty()); break;
+              case 2: if constexpr (N_VARS >= 4) linear_solver = make_gpu_schur_elim_chain<N_VARS, 2>(device_num, use_bicgstab, er, ec, linear_solver_type_str, params->gmres_restart, /*normalize_pressure_rows=*/params->block_row_perm.empty()); break;
+              case 3: if constexpr (N_VARS >= 5) linear_solver = make_gpu_schur_elim_chain<N_VARS, 3>(device_num, use_bicgstab, er, ec, linear_solver_type_str, params->gmres_restart, /*normalize_pressure_rows=*/params->block_row_perm.empty()); break;
+              case 4: if constexpr (N_VARS >= 6) linear_solver = make_gpu_schur_elim_chain<N_VARS, 4>(device_num, use_bicgstab, er, ec, linear_solver_type_str, params->gmres_restart, /*normalize_pressure_rows=*/params->block_row_perm.empty()); break;
               default: break;
             }
           }
@@ -484,7 +543,8 @@ int engine_base_gpu::init_base(conn_mesh *mesh_, std::vector<ms_well *> &well_li
         else
         {
           linear_solver = make_gpu_amgx_cpr_chain<N_VARS>(device_num, use_bicgstab,
-              linear_solver_type_str);
+              linear_solver_type_str, /*amgx_reuse_override=*/-1,
+              /*normalize_pressure_rows=*/false, params->gmres_restart);
         }
       }
       else
@@ -502,6 +562,29 @@ int engine_base_gpu::init_base(conn_mesh *mesh_, std::vector<ms_well *> &well_li
       bicgstab->set_prec(new linsolv_cusparse_ilu<N_VARS>());
       linear_solver = bicgstab;
       linear_solver_type_str = "GPU_BICGSTAB_CUSPARSE_ILU";
+    }
+    // Block-local equation reordering: the chain then solves P A x = P b (same
+    // x). See linsolv_block_row_perm.hpp for why an unpivoted block ILU needs it
+    // when the first local equation is a mineral balance. Applied to WHICHEVER
+    // chain was built -- the BiCGStab + ILU(0) fallback is the one most exposed.
+    // Every block row except the well HEADS: their rows hold control and
+    // state-copy equations, not component balances. Well BODY rows carry the
+    // same balances as the reservoir cells and are permuted with them; a Schur
+    // elimination wrapped inside then finds its eliminated equation in the same
+    // local row everywhere (an unpermuted body row 1 is a flowing balance whose
+    // perforation fluxes reach the eliminated columns of neighbouring cells,
+    // which the wrapper rejects as a multi-level chain).
+    if (!params->block_row_perm.empty() && N_VARS > 1)
+    {
+      std::vector<int> well_heads;
+      for (ms_well *w : well_list_)
+        well_heads.push_back((int)w->well_head_idx);
+      auto *wrap = new opendarts::linear_solvers::linsolv_block_row_perm<N_VARS>(
+          /*on_device=*/true, params->block_row_perm, mesh_->n_blocks, well_heads);
+      wrap->set_prec(linear_solver);
+      wrap->set_inner_owned(true);  // engine deletes only the top-level solver
+      linear_solver = wrap;
+      linear_solver_type_str += " + BLOCK_ROW_PERM";
     }
 #else
     switch (params->linear_type)

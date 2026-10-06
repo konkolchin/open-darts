@@ -149,8 +149,47 @@ protected:
    */
   int generate_hypercube(const key_t &hc_key, value_t *new_hypercube);
 
+  /**
+   * @brief Interpolate the states of one batch on the device.
+   *
+   * The lookup, the status copy and both interpolation kernels are issued on the default stream, the stream the
+   * engine assembles on, so the results are ordered before any later default-stream work without a device-wide
+   * synchronization. A check kernel looks up the hypercube of every state and counts the states whose hypercube is
+   * not in the device map; the host reads only that count (and the int32 cell-index overflow count) before
+   * deciding how to continue. When nothing is missing, the call returns after launching the interpolation kernel,
+   * with no further host synchronization. Otherwise the per-state hypercube keys are copied to the host, the
+   * missing supporting points are evaluated in one evaluate_batch() call, the new hypercubes are uploaded and
+   * inserted on hypercube_generation_stream (host-synchronized per insert batch), and a second kernel interpolates
+   * the states whose hypercube was missing.
+   *
+   * @param n_states_idxs  Number of states to interpolate
+   * @param state_d        Device array of states, N_DIMS values per state
+   * @param states_idxs_d  Device array of the indices of the states to interpolate
+   * @param values_d       Device array of operator values, N_OPS per state (written at the state index)
+   * @param derivatives_d  Device array of operator derivatives, N_OPS * N_DIMS per state
+   * @return 0
+   */
   virtual int evaluate_with_derivatives_d(int n_states_idxs, double *state_d, int *states_idxs_d,
                                           double *values_d, double *derivatives_d) override;
+
+  /**
+   * @brief Create an empty device hypercube map of the initial capacity and reset its host-side mirror.
+   */
+  void create_hypercube_map();
+
+  /**
+   * @brief Launch the interpolation kernel of one stage on the default stream.
+   *
+   * @tparam FIRST_STAGE   true: the states whose hypercube was cached at the check; false: all other states
+   * @param n_states_idxs  Number of states in the batch
+   * @param states_d       Device array of states, N_DIMS values per state
+   * @param states_idxs_d  Device array of the indices of the states to interpolate
+   * @param values_d       Device array of operator values, N_OPS per state
+   * @param derivatives_d  Device array of operator derivatives, N_OPS * N_DIMS per state
+   */
+  template <bool FIRST_STAGE>
+  void launch_interpolation_stage(int n_states_idxs, double *states_d, int *states_idxs_d,
+                                  double *values_d, double *derivatives_d);
 
   // **** HOST DATA ****
   /**
@@ -159,13 +198,21 @@ protected:
   std::unordered_set<key_t, key_hash_t> generated_hypercubes;
 
   pinned_key_vector_t hypercubes_to_compute;        ///< Multi-indices of new hypercubes required per state (host)
-  pinned_value_vector_t new_hypercube_data_buffer;  ///< Generated hypercube data buffer to copy to device (host)
-  pinned_key_vector_t new_hypercube_index_buffer;   ///< Generated hypercube multi-indices buffer to copy to device (host)
-  pinned_int_vector_t hashmap_expansion_needed;     ///< Flag showing if hashmap expansion needed (host)
-  pinned_int_vector_t axis_overflow_count_host;     ///< Per-batch count of int32 cell-index overflows read back from device (host)
+  pinned_value_vector_t new_hypercube_data_buffer;  ///< Generated hypercube data, staged for the copy to device (host)
+  pinned_key_vector_t new_hypercube_index_buffer;   ///< Generated hypercube multi-indices, staged for the copy to device (host)
+  pinned_int_vector_t batch_status_host;            ///< Batch status read back from device: [0] states with a missing hypercube, [1] int32 cell-index overflows
 
-  std::vector<value_t> new_hypercube_data;  ///< Data storage for generated hypercubes (host stable buffer)
-  std::vector<key_t> new_hypercube_index;   ///< Multi-index storage for generated hypercubes (host stable buffer)
+  /**
+   * @brief Host mirror of the device map's slot count (hypercube_data_d->size).
+   */
+  int hashmap_size = 0;
+
+  /**
+   * @brief Host mirror of the device map's occupancy (hypercube_data_d->occupied): the number of hypercubes
+   * inserted since the map was created. The insert kernel adds the batch size to the device counter, so both stay
+   * equal and growth is decided on the host without reading the device header.
+   */
+  int hashmap_occupied = 0;
 
   // **** DEVICE DATA ****
   /**
@@ -182,11 +229,10 @@ protected:
   thrust::device_vector<key_t> state_hc_keys_d;
   thrust::device_vector<value_t> new_hypercube_data_buffer_d;  ///< Generated hypercube data buffer (device)
   thrust::device_vector<key_t> new_hypercube_index_buffer_d;   ///< Generated hypercube multi-indices buffer (device)
-  thrust::device_vector<int> hashmap_expansion_needed_d;
-  thrust::device_vector<int> axis_overflow_count_d; ///< Per-batch int32 cell-index overflow accumulator (device; atomicAdd target)
+  thrust::device_vector<int> batch_status_d;  ///< Batch status accumulators (device; atomicAdd targets), layout as batch_status_host
 
-  cudaStream_t hypercube_generation_stream;
-  cudaStream_t stage1_interpolation_stream;
+  cudaStream_t hypercube_generation_stream;  ///< Stream of the uploads and inserts of generated hypercubes
+  cudaEvent_t batch_status_ready;            ///< Recorded after the batch status copy to host
 };
 
 #include "multilinear_adaptive_gpu_interpolator.tpp"
