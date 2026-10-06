@@ -2,6 +2,13 @@ workflow:
   rules:
     - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_MESSAGE =~ /(\[skip ci\]|\[ci skip\]|\[skip pipeline\]|\[skip-cicd\]|\[skip cicd\]|\[skip-cd\]|\[skip cd\])/i'
       when: never
+    # Reference regeneration (UPLOAD_PKL=1) runs the full model set on the current branch:
+    # force TEST_ALL_MODELS and TEST_CUSTOM_BRANCH so the user does not have to set them too.
+    - if: '$UPLOAD_PKL == "1"'
+      variables:
+        TEST_ALL_MODELS: "1"
+        TEST_CUSTOM_BRANCH: "1"
+      when: always
     # Draft MR pipeline -> MR_NON_DRAFT stays "0" (fast checks only).
     # CI_MERGE_REQUEST_DRAFT is the authoritative flag; the title regex is a fallback for the cases when variable is not defined.
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && ($CI_MERGE_REQUEST_DRAFT == "true" || $CI_MERGE_REQUEST_TITLE =~ /^\s*(\[draft\]|\(draft\)|draft:)/i)'

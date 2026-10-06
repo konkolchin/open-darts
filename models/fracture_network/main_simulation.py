@@ -73,6 +73,14 @@ def run_simulation(idata : InputData, platform : str ='cpu'):
     # compute and save well time data
     time_data_dict = m.output.store_well_time_data(save_output_files=True)
 
+    # plot mass and volumetric rates (perforations, by_sum_perfs and at_wh) and BHP/BHT
+    m.output.plot_well_time_data(phase_molar_rates=False,
+                                 phase_mass_rates=True,
+                                 phase_volumetric_rates=True,
+                                 component_molar_rates=False,
+                                 component_mass_rates=False,
+                                 advective_heat_rates=False)
+
     return m
 
 if __name__ == "__main__":
