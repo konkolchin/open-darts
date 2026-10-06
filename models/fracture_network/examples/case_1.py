@@ -43,6 +43,8 @@ def input_data_case_1():
     idata.geom['frac_aper'] = 1e-3  # (initial) fracture aperture [m]
 
     wctrl = idata.well_data.controls
+    wctrl.inj_rate = 100.  # kg/day, mass rate control (BHP constraint: inj_bhp_constraint)
+    wctrl.prod_rate = 100.  # kg/day, mass rate control (BHP constraint: prod_bhp_constraint)
     wctrl.delta_temp = 40  # inj_temp = initial_temp - delta_temp
     wctrl.delta_p_inj  = 30  # inj_bhp = initial_pressure + delta_p_inj
     wctrl.delta_p_prod = 30  # inj_prod = initial_pressure - delta_p_prod
