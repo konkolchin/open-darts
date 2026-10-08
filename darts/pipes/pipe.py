@@ -76,6 +76,7 @@ class Pipe:
     supported_drift_flux_models = (
         "shi_t2well",
         "tang_2019",
+        "bravo_2027",
         *bhagwat_ghajar_drift_flux_models,
     )
 
@@ -125,6 +126,10 @@ class Pipe:
                                    Bhagwat and Ghajar (2014) with Bai-specific Reynolds/friction and drift terms
                                  - "bhagwat_ghajar_2014" uses the original Bhagwat and Ghajar (2014) drift-flux
                                    correlation with its Colebrook-White friction term
+                                 - "bravo_2027" uses Bravo et al. (Geothermics 143, 103862), equations 11-12,
+                                   for vertical gas/liquid flow.
+                                   DOI: 10.1016/j.geothermics.2026.103862. Experiments used water/nitrogen
+                                   at 20-180 degC; flashing steam at higher temperatures is extrapolation.
         :type drift_flux_model: str
         :param tang_parameter_set: If tang_2019 is used as the drift-flux model, parameterization of the
                                    Tang et al. (2019) unified model. Allowed values are "olgas" and "tuffp".
@@ -273,6 +278,15 @@ class Pipe:
                 f"{', '.join(repr(model) for model in self.supported_drift_flux_models)}."
             )
         self.drift_flux_model = drift_flux_model
+
+        if self.drift_flux_model == "bravo_2027":
+            inclination_angles = np.asarray(
+                pipe_geometry.inclination_angle_radian, dtype=float
+            )
+            if np.any(np.abs(np.sin(inclination_angles)) > 1e-10):
+                raise ValueError(
+                    "drift_flux_model='bravo_2027' requires a vertical pipe."
+                )
 
         if friction_model is None:
             friction_model = (
@@ -1748,7 +1762,91 @@ class Pipe:
             * C4
         )
 
+    @staticmethod
+    def bravo_profile_parameter(superficial_velocity):
+        """
+        Calculate the distribution coefficient using Bravo et al. equation 12.
+        The empirical fit uses speed magnitude, independent of pipe ordering,
+        with a reference speed of 1 m/s.
+
+        :param superficial_velocity: Total superficial velocity j = sG*vG + sL*vL [m/s].
+        :return: Dimensionless distribution coefficient C0.
+        """
+        return 1.0 + 0.5 * np.exp(-0.5 * np.abs(superficial_velocity))
+
+    @classmethod
+    def bravo_drift_velocity(
+        cls, gas_holdup, superficial_velocity, rho_g, rho_l, mu_l, sigma
+    ):
+        """
+        Calculate the upward drift speed using Bravo et al. equation 11.
+        Reference viscosity is 0.001 Pa.s and reference speed is 1 m/s.
+        Both viscosity and velocity ratios have exponent one.
+
+        :param gas_holdup: Dimensionless gas volume fraction in [0, 1].
+        :param superficial_velocity: Total superficial velocity j = sG*vG + sL*vL [m/s].
+        :param rho_g: Gas density [kg/m3].
+        :param rho_l: Liquid density [kg/m3].
+        :param mu_l: Liquid viscosity [Pa.s].
+        :param sigma: Gas-liquid surface tension [N/m].
+        :return: Upward drift speed magnitude [m/s].
+        """
+        if np.any(np.asarray(mu_l) <= 0) or np.any(np.asarray(rho_l) <= 0):
+            raise ValueError(
+                "Bravo drift requires positive liquid viscosity and density."
+            )
+        return (
+            1.53
+            * (np.maximum(sigma * cls.g * (rho_l - rho_g), 0.0) / rho_l**2) ** 0.25
+            * (0.001 / mu_l)
+            * np.abs(superficial_velocity)
+            * np.sqrt(np.clip(1.0 - gas_holdup, 0.0, 1.0))
+        )
+
+    def _update_bravo_drift_velocity(self):
+        [
+            xG_mass0_face,
+            xL_mass0_face,
+            sG0_face,
+            sL0_face,
+            rhoG0_face,
+            rhoL0_face,
+            _,
+            muL0_face,
+        ] = self.iter_phases_props0_face
+        _, _, vG0, vL0 = self.velocities0
+        indices = np.flatnonzero((sG0_face > 0) & (sL0_face > 0))
+        self.vD0 = np.zeros(self.geometry.num_interfaces)
+        self.IFT_face_filtered = np.empty(len(indices))
+        direction = np.broadcast_to(
+            -np.sign(np.cos(self.geometry.inclination_angle_radian)),
+            self.vD0.shape,
+        )
+        for i, idx in enumerate(indices):
+            sigma0 = self.physics.property_containers[0].IFT_ev.evaluate(
+                rhoG0_face[idx], rhoL0_face[idx], xG_mass0_face[idx], xL_mass0_face[idx]
+            )
+            self.IFT_face_filtered[i] = sigma0
+            j0 = sG0_face[idx] * vG0[idx] + sL0_face[idx] * vL0[idx]
+            self.vD0[idx] = direction[idx] * self.bravo_drift_velocity(
+                sG0_face[idx],
+                j0,
+                rhoG0_face[idx],
+                rhoL0_face[idx],
+                muL0_face[idx],
+                sigma0,
+            )
+
     def update_profile_parameter(self):
+        if self.drift_flux_model == "bravo_2027":
+            [_, _, sG0_face, sL0_face, _, _, _, _] = self.iter_phases_props0_face
+            _, _, vG0, vL0 = self.velocities0
+            mask = (sG0_face > 0) & (sL0_face > 0)
+            j0 = sG0_face * vG0 + sL0_face * vL0
+            self.C00 = np.ones(self.geometry.num_interfaces)
+            self.C00_filtered = self.bravo_profile_parameter(j0[mask])
+            self.C00[mask] = self.C00_filtered
+            return
         geom = self.geometry
         num_interfaces = geom.num_interfaces
         [rhoM0_vM0, vM0_all, vG0, vL0] = self.velocities0
@@ -1873,6 +1971,9 @@ class Pipe:
             self.C00 = np.ones(num_interfaces)
 
     def update_drift_velocity(self):
+        if self.drift_flux_model == "bravo_2027":
+            self._update_bravo_drift_velocity()
+            return
         geom = self.geometry
         num_interfaces = geom.num_interfaces
         # if np.all(self.C00 == 1):
