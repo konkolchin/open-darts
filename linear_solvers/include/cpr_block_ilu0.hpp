@@ -94,21 +94,37 @@ namespace opendarts
         }
       }
 
-      // Minv = M^{-1} via Gauss-Jordan with partial pivoting. Returns false
-      // when a pivot underflows (near-singular block).
+      // Minv = M^{-1} via Gauss-Jordan with partial pivoting on the
+      // row-equilibrated block. Returns false when the block is singular.
+      //
+      // Rows are equilibrated first: R M with R = diag(1 / max_j |M_ij|), so every
+      // row has unit max-norm; the scaled block is inverted and the scaling undone,
+      // M^{-1} = (R M)^{-1} R. Without it the pivot test compares a pivot of a small
+      // row (e.g. a CO2 mass balance ~1e-5 in near-pure water) against the block's
+      // largest entry (an energy row ~1e12), declares a regular block singular and
+      // replaces its inverse by the identity -- which along a chain of well segments
+      // cascades to Inf/NaN in the preconditioner (GMRES rc -4).
       static bool invert_dense(const mat_float *M_in, mat_float *Minv)
       {
         mat_float M[B2];
-        std::copy(M_in, M_in + B2, M);
+        mat_float row_scale[Ni];
+        for (int r = 0; r < Ni; ++r)
+        {
+          mat_float row_max = 0.0;
+          for (int c = 0; c < Ni; ++c)
+            row_max = std::max(row_max, std::abs(M_in[r * Ni + c]));
+          if (!(row_max > 0.0) || !std::isfinite(row_max))
+            return false;  // zero or non-finite row: genuinely singular
+          row_scale[r] = 1.0 / row_max;
+          for (int c = 0; c < Ni; ++c)
+            M[r * Ni + c] = M_in[r * Ni + c] * row_scale[r];
+        }
         for (int r = 0; r < Ni; ++r)
           for (int c = 0; c < Ni; ++c)
             Minv[r * Ni + c] = (r == c) ? 1.0 : 0.0;
 
-        mat_float scale = 1.0;
-        for (std::size_t k = 0; k < B2; ++k)
-          scale = std::max(scale, std::abs(M[k]));
-        const mat_float piv_tol =
-            std::numeric_limits<mat_float>::epsilon() * scale * 100.0;
+        // the rows are equilibrated, so the largest entry is 1
+        const mat_float piv_tol = std::numeric_limits<mat_float>::epsilon() * 100.0;
 
         for (int col = 0; col < Ni; ++col)
         {
@@ -151,6 +167,10 @@ namespace opendarts
             }
           }
         }
+        // Minv now holds (R M)^{-1}; M^{-1} = (R M)^{-1} R scales column c by row_scale[c]
+        for (int r = 0; r < Ni; ++r)
+          for (int c = 0; c < Ni; ++c)
+            Minv[r * Ni + c] *= row_scale[c];
         return true;
       }
 
