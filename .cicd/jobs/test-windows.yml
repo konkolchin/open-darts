@@ -37,13 +37,13 @@
         # keep the status so the tests below still run when models fail (1 if darts does not start)
         - Set-Variable -Scope Global LASTEXITCODE 1
         - darts run_test_suite2.py LOG; Set-Variable MODELS_STATUS $LASTEXITCODE; echo "run_test_suite2 returned $MODELS_STATUS"
-        # Run the interpolator tests from a scratch CWD outside the checkout so Python
+        # Run the interpolator and geomechanics tests from a scratch CWD outside the checkout so Python
         # imports the installed wheel. From the repo root the in-source darts/ package
         # (which has no compiled extensions on Windows) shadows the site-packages wheel,
         # so `import darts.engines/interpolators` fails during collection. The tests
         # write nothing to CWD, so a shared scratch dir is safe. Mirrors test-linux.yml.
         - cd $env:TEMP
-        - python -m pytest "$env:CI_PROJECT_DIR\tests\interpolators" -v
+        - python -m pytest "$env:CI_PROJECT_DIR\tests\interpolators" "$env:CI_PROJECT_DIR\tests\geomechanics_nucleus_of_strain" -v
         - cd $env:CI_PROJECT_DIR
         # test discretizer
         - cd discretizer\tests\compare_discretizers

@@ -155,6 +155,7 @@ class Model(THMCModel):
         bnd_tags['BND_Z-'] = 995
         bnd_tags['BND_Z+'] = 996
         self.idata.mesh.matrix_tags = [99991]
+        self.idata.mesh.z_axis_direction = 'upwards'  # z in spe10.msh is elevation
 
         self.idata.obl.zero = 1e-9
         self.idata.obl.p_step = 2.5
@@ -264,7 +265,7 @@ class Model(THMCModel):
             ids = ((centroids[:, 0] - coord[0]) ** 2 + (centroids[:, 1] - coord[1]) ** 2).argsort()
             self.well_cell_ids.append(ids[:self.nz])
             # adding well
-            self.reservoir.add_well(well_names[i], depth=well_init_depth)
+            self.reservoir.add_well(well_names[i])
             # adding perforations
             for cell_id in ids[:self.nz]:
                 cell = elems[cell_id]
@@ -287,7 +288,7 @@ class Model(THMCModel):
                 wi_z = 2 * np.pi * np.sqrt(mean_perm_xx * mean_perm_yy) * dz / np.log(rp_z / rw)
                 well_index = np.sqrt(wi_x ** 2 + wi_y ** 2 + wi_z ** 2)
                 # add perforation
-                self.reservoir.add_perforation(self.reservoir.wells[-1], cell_id, well_index=well_index)
+                self.reservoir.add_perforation(well_names[i], cell_id, well_index=well_index, ms_epm=True)
 
     def set_boundary_conditions(self):
         from darts.engines import well_control_iface

@@ -20,7 +20,29 @@
   - `mech_discretizer`: fixed boundary faces on non-orthogonal meshes (loaded no-flow faces were off by up to 30% on hex), the gravity term of the interface pressure, and two crashes/memory corruptions with `neumann_boundaries_grad_reconstruction = False` and `gradients_extended_stencil = True`. `SPE10_mech` thermal runs change by less than 0.1%.
   - `UnstructReservoirMech.init_gravity()` without `gravity_coeff` now uses g instead of Newton's gravitational constant; an unknown direction raises `ValueError`.
   - `pm_discretizer` VTK output now writes E and nu per region.
+- Geomechanical models ([!323](https://gitlab.com/open-darts/open-darts/-/merge_requests/323)):
+  - DARTS:
+    - `mech_discretizer`: boundary rows of the displacement-gradient least squares are equilibrated (no more indefinite diagonal blocks and FS-CPR divergence);
+    - new `check_displacement_diagonal()` in `mech_discretizer` and `pm_discretizer`;
+    - non-finite pressure/temperature gradient inverses are reported (`RuntimeError`);
+    - multi-segment wells in mechanics models: fixed well gravity sign and head depth ([link](https://gitlab.com/open-darts/open-darts/-/work_items/101)), `add_perforation` requires `well_index`; new `idata.mesh.z_axis_direction` (`'downwards'`/`'upwards'`) sets the gravity direction, `SPE10_mech` uses `'upwards'`;
+    - optimization: rock properties evaluated once per mesh tag (faster discretization), stencil arrays sized from the actual stencils (reduced memory allocation);
+    - vtk output: fixed effective stress (shear components) and viscosity;
+    - `darts.physics.geomechanics.nucleus_of_strain`: the C++ nucleus-of-strain solution `_proxygeomech` is built by the open-darts CMake and shipped in the wheel (CUDA path in GPU builds), with a regression test; added thermoelastic stress, fixed total stress;
+    - `darts.tools.vtk_io` / `cicd_tools`: vtk and performance comparison with reference files;
+    - recovered the MshIO version with the mesh memory fix (41x41x66: 52.5 GB to 9.6 GB).
+  - `THM_vs_nucleus_of_strain` model:
+    - rock properties set by mesh tags (`idata.other.set_props_by_tags`), inheritable cases, rock-property checks;
+    - reworked mesh generation, externally generated meshes, mesh checker (`check_mesh.py`);
+    - fault stability analysis and plotting
+    - equilibrium (K0) check;
+    - temperature-dependent water viscosity (`MaoDuan2009Shifted`) and density;
+    - optional discretization cache (`idata.other.cache_discretization`, off by default);
+    - checked in the pipelines (`rect_17x17x15`);
+    - `main_proxy.py` renamed to `main_nucleus_of_strain.py`, hexahedral meshes only;
+    - added README.md.
 - Breaking changes:
+  - Results of `mech_discretizer` models change in boundary cells. Mechanics engines no longer expose `N_VARS`; use `engine.get_n_vars()`. Results of models with multi-segment wells in `mech_discretizer` change. `UnstructReservoirMech.add_well(name, depth)` is now `add_well(well_name)`, and `add_perforation(well, res_cell_idx, well_index)` is now `add_perforation(well_name, res_cell_idx, ..., well_index=...)` (the well name instead of the `ms_well` object; `well_index` is required). [!323](https://gitlab.com/open-darts/open-darts/-/merge_requests/323)
   - Results of `mech_discretizer` models with Biot or thermal-expansion contrasts, and of models using the default `init_gravity()`, change. Layered models that start from non-zero pressure or temperature should be initialized with `set_equilibrium`. ([!355](https://gitlab.com/open-darts/open-darts/-/merge_requests/355))
 
 # 2.0.0 [10-09-2026]

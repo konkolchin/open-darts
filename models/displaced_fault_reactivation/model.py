@@ -159,7 +159,7 @@ class Model(THMCModel):
             p_var=engine.P_VAR,
             z_var=engine.Z_VAR,
             u_var=engine.U_VAR,
-            nc=engine.N_VARS - 3,
+            nc=engine.get_n_vars() - 3,
         )
         # 1e-10 / 500, not the sim_params defaults (1e-5 / 50). Until !280 this model
         # ran a *direct* solve (ls_params[0] = cpu_superlu), and ref/*/solution_fault1.vtu
@@ -253,9 +253,11 @@ class Model(THMCModel):
             print('well perforation location prod:', pt_right)
             self.id_prod = np.linalg.norm(centroids - pt_right, axis=1).argmin()
 
-            self.reservoir.add_well("PROD001", depth=self.reservoir.unstr_discr.depth_all_cells[self.id_prod])
-            self.reservoir.add_perforation(self.reservoir.wells[-1], int(self.id_prod),
-                                           well_index=well_index)
+            self.reservoir.add_well("PROD001")
+            self.reservoir.add_perforation("PROD001", int(self.id_prod), well_index=well_index)
+            # the well is controlled at the depth of its only perforated cell
+            well = self.reservoir.get_well("PROD001")
+            well.well_head_depth = well.well_body_depth = self.reservoir.unstr_discr.depth_all_cells[self.id_prod]
     def set_input_data(self):
         pass
     def set_initial_conditions(self):
