@@ -1,3 +1,10 @@
+"""
+Helpers for the model test suite (models/run_test_suite2.py).
+
+vtk solutions are stored as references and compared with them by `save_vtk_ref()` and
+`compare_vtk_with_ref()` in darts.tools.vtk_io.
+"""
+
 import os
 import pickle
 import platform

@@ -116,6 +116,7 @@ def run_testing(platform, overwrite, heavy_models, test_all_models):
     test_dirs_mech += ['1ph_1comp_poroelastic_convergence']  # NE = 2
     test_args_mech = [test_args_mech, [['']]]  # no args for the convergence test
 
+
     if platform == 'cpu':
         test_dirs_mech += ['SPE10_mech']
         physics_list = ['single_phase', 'single_phase_thermal', 'dead_oil', 'dead_oil_thermal']
@@ -125,6 +126,12 @@ def run_testing(platform, overwrite, heavy_models, test_all_models):
             for mesh in meshes_list:
                 test_args_mech_spe10.append([mesh, physics])
         test_args_mech += [test_args_mech_spe10]
+        test_dirs_mech += ['THM_vs_nucleus_of_strain']
+        # the case fixes the physics: rect_* is HM, thm_rect_* THM
+        test_args_mech += [[
+                    ['rect_17x17x15'],
+                    ['thm_rect_17x17x15'],
+                ]]
 
     if heavy_models:
         test_dirs_mech += ['displaced_fault_reactivation']
@@ -417,6 +424,11 @@ if __name__ == '__main__':
 
     # print build info
     engines_pbi()
+
+    # environment variables that select what the suite runs and how, as set by the caller (before the defaults below); 
+    for var in ['UPLOAD_PKL', 'TEST_ALL_MODELS', 'MR_NON_DRAFT', 'OMP_NUM_THREADS', 'TEST_GPU',
+                'GPU_DEVICE', 'ODLS', 'TEST_CUSTOM_BRANCH']:
+        print('env %s=%s' % (var, os.getenv(var, '<unset>')))
 
     # multithreaded run can be enabled by setting OMP_NUM_THREADS environment variable
     if os.getenv('OMP_NUM_THREADS') == None:

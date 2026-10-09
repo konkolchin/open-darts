@@ -43,8 +43,9 @@ class UnstructReservoirCustom(UnstructReservoirMech):
         self.set_uniform_initial_conditions(idata=idata)
         self.set_boundary_conditions(idata=idata)
         self.init_mech_discretizer(idata=idata)
-        self.grav = -9.80665e-5
-        self.init_gravity(gravity_on=True, gravity_coeff=self.grav)
+        self.grav = 9.80665e-5
+        self.init_gravity(gravity_on=True, gravity_coeff=self.grav,
+                          gravity_direction=self.gravity_direction_from_z_axis(idata.mesh.z_axis_direction))
 
         # specify initial temperature
         if self.thermoporoelasticity:

@@ -18,10 +18,7 @@ class Model(THMCModel):
     def init(self, *args, **kwargs):
         super().init(*args, **kwargs)
         if self.mode == 'thermoporoelastic':
-            vol_strain_trans = np.array(self.reservoir.mesh.vol_strain_tran, copy=False)
-            vol_strain_rhs = np.array(self.reservoir.mesh.vol_strain_rhs, copy=False)
-            vol_strain_trans[:] = 0.0
-            vol_strain_rhs[:] = 0.0
+            self.reservoir.decouple_geomech()
 
         Xref = np.array(self.physics.engine.Xref, copy=False)
         Xn_ref = np.array(self.physics.engine.Xn_ref, copy=False)
@@ -59,7 +56,7 @@ class Model(THMCModel):
                 p_var=engine.P_VAR,
                 z_var=engine.Z_VAR,
                 u_var=engine.U_VAR,
-                nc=engine.N_VARS - 3,
+                nc=engine.get_n_vars() - 3,
             )
         fs_cpr = FSCPRSolverSpec(**fs_cpr_kwargs)
         # Single solver declaration. The FS-CPR spec drives _apply_solver on the

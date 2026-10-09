@@ -101,6 +101,11 @@ add_subdirectory(mech)
 # ------------------------------------------------------------------------------
 
 
+# --- Include nucleus-of-strain geomechanics proxy (separate _proxygeomech module)
+add_subdirectory(mech_nucleus_of_strain)
+# ------------------------------------------------------------------------------
+
+
 # --- Build engines_build_info -------------------------------------------------
 # Set library files
 
