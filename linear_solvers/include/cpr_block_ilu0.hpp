@@ -44,10 +44,10 @@ namespace opendarts
      *  Structure (column ordering, diagonal positions) is prepared once and
      *  reused as long as the bound matrix keeps its sparsity; factor()
      *  re-runs the numerical factorisation from the current values. A
-     *  near-singular (updated) diagonal block falls back to an identity
-     *  block inverse -- mirroring linsolv_mgr's default BILU0 fallback -- so
-     *  a handful of degenerate well blocks degrade smoothing quality locally
-     *  instead of failing the whole preconditioner.
+     *  singular (updated) diagonal block falls back to the scaled identity
+     *  diag(1 / max_j |D_ij|). It keeps the row scales of the block: with
+     *  the plain identity the blocks factored after a singular one, e.g.
+     *  the next segments of a well, would be singular as well.
      */
     template <uint8_t N_BLOCK_SIZE>
     class cpr_block_ilu0
@@ -66,7 +66,7 @@ namespace opendarts
       std::vector<index_t> sorted_pos_; // per-row block positions in ascending column order
       std::vector<mat_float> f_;        // factored block values (copy of A's values)
       std::vector<mat_float> dinv_;     // explicit inverses of factored diagonal blocks
-      std::size_t n_fallback_ = 0;      // diagonal blocks replaced by identity
+      std::size_t n_fallback_ = 0;      // singular diagonal blocks (scaled-identity fallback)
 
       // C = A * B (dense N x N, row-major).
       static void block_mul(const mat_float *A, const mat_float *B, mat_float *C)
@@ -94,21 +94,34 @@ namespace opendarts
         }
       }
 
-      // Minv = M^{-1} via Gauss-Jordan with partial pivoting. Returns false
-      // when a pivot underflows (near-singular block).
+      // Minv = M^{-1} via Gauss-Jordan with partial pivoting on the
+      // row-equilibrated block: M^{-1} = (R M)^{-1} R, R = diag(1 / max_j |M_ij|).
+      // Returns false when the block is singular: a zero, subnormal or infinite
+      // row, or a pivot below 100 eps of the equilibrated rows. Equilibration
+      // makes the pivot choice and the singularity test independent of the row
+      // scales, which in well blocks differ by many orders of magnitude (mass
+      // and energy balances).
       static bool invert_dense(const mat_float *M_in, mat_float *Minv)
       {
         mat_float M[B2];
-        std::copy(M_in, M_in + B2, M);
+        mat_float row_scale[Ni];
+        for (int r = 0; r < Ni; ++r)
+        {
+          mat_float row_max = 0.0;
+          for (int c = 0; c < Ni; ++c)
+            row_max = std::max(row_max, std::abs(M_in[r * Ni + c]));
+          if (!(row_max >= std::numeric_limits<mat_float>::min()) || !std::isfinite(row_max))
+            return false; // zero, subnormal or infinite row
+          row_scale[r] = 1.0 / row_max;
+          for (int c = 0; c < Ni; ++c)
+            M[r * Ni + c] = M_in[r * Ni + c] * row_scale[r];
+        }
         for (int r = 0; r < Ni; ++r)
           for (int c = 0; c < Ni; ++c)
             Minv[r * Ni + c] = (r == c) ? 1.0 : 0.0;
 
-        mat_float scale = 1.0;
-        for (std::size_t k = 0; k < B2; ++k)
-          scale = std::max(scale, std::abs(M[k]));
-        const mat_float piv_tol =
-            std::numeric_limits<mat_float>::epsilon() * scale * 100.0;
+        // the rows are equilibrated, so the largest entry is 1
+        const mat_float piv_tol = std::numeric_limits<mat_float>::epsilon() * 100.0;
 
         for (int col = 0; col < Ni; ++col)
         {
@@ -151,6 +164,10 @@ namespace opendarts
             }
           }
         }
+        // Minv now holds (R M)^{-1}; M^{-1} = (R M)^{-1} R scales column c by row_scale[c]
+        for (int r = 0; r < Ni; ++r)
+          for (int c = 0; c < Ni; ++c)
+            Minv[r * Ni + c] *= row_scale[c];
         return true;
       }
 
@@ -235,16 +252,24 @@ namespace opendarts
                 dst[e] -= tmp[e];
             }
           }
-          // Invert the (updated) diagonal block; identity fallback keeps the
-          // preconditioner usable when a well block degenerates.
+          // Invert the (updated) diagonal block; a singular one falls back to
+          // the scaled identity (see the class comment).
           const mat_float *D =
               f_.data() + static_cast<std::size_t>(diag_pos_[i]) * B2;
           mat_float *Dinv = dinv_.data() + static_cast<std::size_t>(i) * B2;
           if (!invert_dense(D, Dinv))
           {
             for (int r = 0; r < Ni; ++r)
+            {
+              mat_float row_max = 0.0;
               for (int c = 0; c < Ni; ++c)
-                Dinv[r * Ni + c] = (r == c) ? 1.0 : 0.0;
+                row_max = std::max(row_max, std::abs(D[r * Ni + c]));
+              // a zero, subnormal or non-finite row has no scale: identity entry
+              const mat_float d =
+                  (row_max >= std::numeric_limits<mat_float>::min() && std::isfinite(row_max)) ? 1.0 / row_max : 1.0;
+              for (int c = 0; c < Ni; ++c)
+                Dinv[r * Ni + c] = (r == c) ? d : 0.0;
+            }
             ++n_fallback_;
           }
         }
@@ -302,8 +327,8 @@ namespace opendarts
         }
       }
 
-      /** Diagonal blocks replaced by the identity fallback in the last
-       *  factor() (diagnostic). */
+      /** Diagonal blocks replaced by the scaled-identity fallback in the
+       *  last factor() (diagnostic). */
       std::size_t fallback_count() const { return n_fallback_; }
     };
   } // namespace linear_solvers
