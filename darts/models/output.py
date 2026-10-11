@@ -19,6 +19,10 @@ from darts.physics.base.physics import PhysicsBase
 from darts.tools.hdf5_tools import load_hdf5_to_dict
 from darts.tools.vtk_io import write_lines_vtp, write_pvd
 
+# Dead state that advective heat rates are reported relative to.
+DEAD_STATE_PRESSURE = 1.01325  # bar (1 atm)
+DEAD_STATE_TEMPERATURE = 273.15 + 15.0  # K (15 deg C)
+
 # ── Picklable accessors for output-property dicts ─────────────────────────────
 # Replace the per-region lambdas used by set_phase_properties / filter_phase_props
 # with top-level callable classes so the resulting props dict can be shipped to a
@@ -2447,6 +2451,45 @@ class Output:
             "Reservoir operators must expose GRAV_OP/PC_OP for rate calculation."
         )
 
+    def _calc_dead_enthalpies(
+        self,
+        phase_flux_ops: np.ndarray,
+        molar_ops: np.ndarray,
+        p_dead: float,
+        T_dead: float,
+    ) -> np.ndarray:
+        """
+        Calculate the enthalpy of the phase at dead pressure and temperature.
+
+        :param phase_flux_ops: Upwinded component flux operators, shaped
+            (batch, phases, fluid components), proportional to phase mole fractions.
+        :param molar_ops: Upwind phase molar-flow coefficients.
+        :param p_dead: Dead pressure [bar].
+        :param T_dead: Dead temperature [K].
+        :return: Dead enthalpies [kJ/kmol].
+        """
+        pc = self.physics.property_containers[0]
+        enthalpies = np.zeros_like(molar_ops)
+        reference_cache = {}
+        for row, phase in np.argwhere(molar_ops):
+            components = phase_flux_ops[row, phase]
+            total = components.sum()
+            if not np.isfinite(total) or total <= 0:
+                raise ValueError("The phase has invalid component flux operators")
+            composition = components / total
+            key = tuple(composition)
+            if key not in reference_cache:
+                # A PT state of the phase's composition, with no solids.
+                reference_state = np.zeros(pc.nc + 1)
+                reference_state[0] = p_dead
+                full_composition = np.zeros(pc.nc)
+                full_composition[: pc.nc_fl] = composition
+                reference_state[1 : pc.nc] = full_composition[:-1]
+                reference_state[pc.nc] = T_dead
+                reference_cache[key] = pc.compute_total_enthalpy(reference_state)
+            enthalpies[row, phase] = reference_cache[key]
+        return enthalpies
+
     def calc_rates_at_conns(
         self,
         h5_well_data: dict,
@@ -2494,13 +2537,15 @@ class Output:
         p_idx = h5_well_data["dynamic"]["variable_names"].index("pressure")
         if thermal:
             if physics.state_spec == physics.StateSpecification.PT:
-                t_idx = h5_well_data["dynamic"]["variable_names"].index("temperature")
+                thermal_variable = "temperature"
             elif physics.state_spec == physics.StateSpecification.PH:
-                t_idx = h5_well_data["dynamic"]["variable_names"].index("enthalpy")
+                thermal_variable = "enthalpy"
             else:
                 raise Exception(
                     "Neither temperature nor enthalpy exists in the list of variables!"
                 )
+            if thermal_variable not in h5_well_data["dynamic"]["variable_names"]:
+                raise ValueError(f"Missing thermal variable: {thermal_variable}")
         elif not thermal and rate_type == "advective_heat_rates":
             raise Exception(
                 "The model is isothermal, so advective heat rate cannot be calculated for it!"
@@ -2680,81 +2725,29 @@ class Output:
                 well_ops_p[:, op_start : op_start + pc.nph],
             )
 
-            # Calculate dead operators at standard surface conditions
-            p_dead = 1.01325  # Dead pressure (1 atm)
-            T_dead = 273.15 + 15  # Dead temperature (15 deg C)
-            # The legacy PT-window bounds check was removed — adaptive interpolators
-            # cache the dead state on demand wherever it falls in state space.
+            molar_rate_start = int(well_control_iface.MOLAR_RATE) * pc.nph
+            molar_ops = np.where(
+                upwind_m,
+                well_ops_m[:, molar_rate_start : molar_rate_start + pc.nph],
+                well_ops_p[:, molar_rate_start : molar_rate_start + pc.nph],
+            )
 
-            states_m_dead = states_m_2d.copy()
-            states_p_dead = states_p_2d.copy()
-            states_m_dead[:, p_idx] = p_dead
-            states_p_dead[:, p_idx] = p_dead
-            states_m_dead[:, t_idx] = T_dead
-            states_p_dead[:, t_idx] = T_dead
-
-            # Calculate heat operators at the dead state (1 atm and 15 deg C)
-            if physics.state_spec == physics.StateSpecification.PT:
-                values_dead_m = evaluate_ops(
-                    states_m_dead, n_well_ctrl_ops, physics.well_ctrl_itor
-                )
-                values_dead_p = evaluate_ops(
-                    states_p_dead, n_well_ctrl_ops, physics.well_ctrl_itor
-                )
-                op_start = int(well_control_iface.ADVECTIVE_HEAT_RATE) * pc.nph
-                ops_dead = np.where(
-                    upwind_m,
-                    values_dead_m[:, op_start : op_start + pc.nph],
-                    values_dead_p[:, op_start : op_start + pc.nph],
-                )
-            elif physics.state_spec == physics.StateSpecification.PH:
-                # Calculate enthalpy for the dead state with temperature as the thermal variable
-                n_thermal_var_op = physics.thermal_var_operator.n_ops
-
-                enthalpies_dead_m = value_vector(
-                    np.zeros(batch_size * n_thermal_var_op)
-                )
-                denthalpies_dead_m = value_vector(
-                    np.zeros((batch_size * n_thermal_var_op) * n_vars)
-                )
-                physics.thermal_var_itor.evaluate_with_derivatives(
-                    value_vector(states_m_dead.ravel()),
-                    block_idx,
-                    enthalpies_dead_m,
-                    denthalpies_dead_m,
-                )
-                enthalpies_dead_p = value_vector(
-                    np.zeros(batch_size * n_thermal_var_op)
-                )
-                denthalpies_dead_p = value_vector(
-                    np.zeros((batch_size * n_thermal_var_op) * n_vars)
-                )
-                physics.thermal_var_itor.evaluate_with_derivatives(
-                    value_vector(states_p_dead.ravel()),
-                    block_idx,
-                    enthalpies_dead_p,
-                    denthalpies_dead_p,
-                )
-
-                # Update the dead state array (containing temperatures) with calculated enthalpies
-                states_m_dead[:, t_idx] = np.asarray(enthalpies_dead_m)
-                states_p_dead[:, t_idx] = np.asarray(enthalpies_dead_p)
-
-                # Now pass the dead state array with enthalpies to the well control interpolator
-                values_dead_m = evaluate_ops(
-                    states_m_dead, n_well_ctrl_ops, physics.well_ctrl_itor
-                )
-                values_dead_p = evaluate_ops(
-                    states_p_dead, n_well_ctrl_ops, physics.well_ctrl_itor
-                )
-                op_start = int(well_control_iface.ADVECTIVE_HEAT_RATE) * pc.nph
-                ops_dead = np.where(
-                    upwind_m,
-                    values_dead_m[:, op_start : op_start + pc.nph],
-                    values_dead_p[:, op_start : op_start + pc.nph],
-                )
-
-            ops = ops - ops_dead
+            # Get flux operators to get phase composition from them later in _calc_dead_enthalpies
+            flux_start = reservoir_operator.FLUX_OP
+            flux_ops_m = reservoir_ops_m[
+                :, flux_start : flux_start + ne * pc.nph
+            ].reshape(batch_size, pc.nph, ne)
+            flux_ops_p = reservoir_ops_p[
+                :, flux_start : flux_start + ne * pc.nph
+            ].reshape(batch_size, pc.nph, ne)
+            phase_flux_ops = np.where(upwind_m[:, :, None], flux_ops_m, flux_ops_p)
+            reference_enthalpies = self._calc_dead_enthalpies(
+                phase_flux_ops[:, :, : pc.nc_fl],
+                molar_ops,
+                p_dead=DEAD_STATE_PRESSURE,
+                T_dead=DEAD_STATE_TEMPERATURE,
+            )
+            ops = ops - molar_ops * reference_enthalpies
 
         # Reshape arrays
         if rate_type in [
