@@ -69,7 +69,7 @@ if __name__ == '__main__':
             phase_volumetric_rates = True,
             # component_molar_rates = False,
             # component_mass_rates  = False,
-            # advective_heat_rates = False,
+            # energy_rates = False,
                 )
 
     else:

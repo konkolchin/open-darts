@@ -79,7 +79,7 @@ def run_simulation(idata : InputData, platform : str ='cpu'):
                                  phase_volumetric_rates=True,
                                  component_molar_rates=False,
                                  component_mass_rates=False,
-                                 advective_heat_rates=False)
+                                 energy_rates=False)
 
     return m
 

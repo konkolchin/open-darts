@@ -143,7 +143,7 @@ def run(physics_type : str, case: str, out_dir: str, export_vtk=True, redirect_l
                                      phase_volumetric_rates=True,
                                      component_molar_rates=False,
                                      component_mass_rates=False,
-                                     advective_heat_rates=False)
+                                     energy_rates=False)
         # add_columns_time_data(time_data)
 
         # COMPUTE TIME DATA AT FIXED REPORTING STEPS

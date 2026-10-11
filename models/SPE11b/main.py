@@ -400,7 +400,7 @@ if __name__ == '__main__':
                     phase_volumetric_rates = False,
                     component_molar_rates = False,
                     component_mass_rates = True,
-                    advective_heat_rates = False,
+                    energy_rates = False,
                     save_output_files = True
                 )
                 m.output.plot_well_time_data()
