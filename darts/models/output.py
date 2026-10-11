@@ -2089,13 +2089,13 @@ class Output:
 
     def store_well_time_data(
         self,
-        phase_molar_rates: bool = True,
-        phase_mass_rates: bool = True,
-        phase_volumetric_rates: bool = True,
-        component_molar_rates: bool = True,
-        component_mass_rates: bool = True,
-        energy_rates: bool = True,
-        energy_rates_relative_to_dead_state: bool = False,
+        phase_molar_rate: bool = True,
+        phase_mass_rate: bool = True,
+        phase_volumetric_rate: bool = True,
+        component_molar_rate: bool = True,
+        component_mass_rate: bool = True,
+        energy_rate: bool = True,
+        energy_rate_relative_to_dead_state: bool = False,
         save_output_files: bool = False,
     ):
         """
@@ -2106,23 +2106,23 @@ class Output:
         1- summing up the rates of perforations
         2- calculating the rates directly at the wellhead connection
 
-        :param phase_molar_rates: Compute phase molar rates
-        :type phase_molar_rates: bool
-        :param phase_mass_rates: Compute phase mass rates
-        :type phase_mass_rates:bool
-        :param phase_volumetric_rates: Compute phase volumetric rates
-        :type phase_volumetric_rates:bool
-        :param component_molar_rates: Compute component molar rates
-        :type component_molar_rates: bool
-        :param component_mass_rates: Compute component mass rates
-        :type component_mass_rates: bool
-        :param energy_rates: Compute energy rates for thermal scenarios,
+        :param phase_molar_rate: Compute phase molar rates
+        :type phase_molar_rate: bool
+        :param phase_mass_rate: Compute phase mass rates
+        :type phase_mass_rate:bool
+        :param phase_volumetric_rate: Compute phase volumetric rates
+        :type phase_volumetric_rate:bool
+        :param component_molar_rate: Compute component molar rates
+        :type component_molar_rate: bool
+        :param component_mass_rate: Compute component mass rates
+        :type component_mass_rate: bool
+        :param energy_rate: Compute energy rates for thermal scenarios,
             i.e., molar rate * molar enthalpy
-        :type energy_rates: bool
-        :param energy_rates_relative_to_dead_state: Compute energy rates for thermal
+        :type energy_rate: bool
+        :param energy_rate_relative_to_dead_state: Compute energy rates for thermal
             scenarios relative to the dead state (1 atm, 15 deg C),
             i.e., molar rate * molar enthalpy - molar rate * molar enthalpy at dead state.
-        :type energy_rates_relative_to_dead_state: bool
+        :type energy_rate_relative_to_dead_state: bool
         :param save_output_files: Flag to save time_data as a .pkl and .xlsx file in the output folder
         :type save_output_files: bool
         """
@@ -2147,15 +2147,15 @@ class Output:
 
         # Store types of well rates in a list to be calculated
         rate_types = []
-        rate_types += ["phase_molar_rate"] if phase_molar_rates else []
-        rate_types += ["phase_mass_rate"] if phase_mass_rates else []
-        rate_types += ["phase_volumetric_rate"] if phase_volumetric_rates else []
-        rate_types += ["component_molar_rate"] if component_molar_rates else []
-        rate_types += ["component_mass_rate"] if component_mass_rates else []
-        rate_types += ["energy_rate"] if energy_rates and self.thermal else []
+        rate_types += ["phase_molar_rate"] if phase_molar_rate else []
+        rate_types += ["phase_mass_rate"] if phase_mass_rate else []
+        rate_types += ["phase_volumetric_rate"] if phase_volumetric_rate else []
+        rate_types += ["component_molar_rate"] if component_molar_rate else []
+        rate_types += ["component_mass_rate"] if component_mass_rate else []
+        rate_types += ["energy_rate"] if energy_rate and self.thermal else []
         rate_types += (
             ["energy_rate_relative_to_dead_state"]
-            if energy_rates_relative_to_dead_state and self.thermal
+            if energy_rate_relative_to_dead_state and self.thermal
             else []
         )
 
@@ -2787,13 +2787,13 @@ class Output:
 
     def plot_well_time_data(
         self,
-        phase_molar_rates: bool = True,
-        phase_mass_rates: bool = True,
-        phase_volumetric_rates: bool = True,
-        component_molar_rates: bool = True,
-        component_mass_rates: bool = True,
-        energy_rates: bool = True,
-        energy_rates_relative_to_dead_state: bool = False,
+        phase_molar_rate: bool = True,
+        phase_mass_rate: bool = True,
+        phase_volumetric_rate: bool = True,
+        component_molar_rate: bool = True,
+        component_mass_rate: bool = True,
+        energy_rate: bool = True,
+        energy_rate_relative_to_dead_state: bool = False,
     ):
         """
         Plot well time data.
@@ -2802,21 +2802,21 @@ class Output:
         always included in the plots. Additional well rate categories can
         be enabled or disabled using the corresponding boolean input arguments.
 
-        :param phase_molar_rates: Plot phase molar rates, default is True
-        :type phase_molar_rates: bool
-        :param phase_mass_rates: Plot phase mass rates, default is True
-        :type phase_mass_rates:bool
-        :param phase_volumetric_rates: Plot phase volumetric rates, default is True
-        :type phase_volumetric_rates:bool
-        :param component_molar_rates: Plot component molar rates, default is True
-        :type component_molar_rates: bool
-        :param component_mass_rates: Plot component mass rates, default is True
-        :type component_mass_rates: bool
-        :param energy_rates: Plot energy rates for thermal scenarios, default is True
-        :type energy_rates: bool
-        :param energy_rates_relative_to_dead_state: Plot energy rates relative to the
+        :param phase_molar_rate: Plot phase molar rates, default is True
+        :type phase_molar_rate: bool
+        :param phase_mass_rate: Plot phase mass rates, default is True
+        :type phase_mass_rate:bool
+        :param phase_volumetric_rate: Plot phase volumetric rates, default is True
+        :type phase_volumetric_rate:bool
+        :param component_molar_rate: Plot component molar rates, default is True
+        :type component_molar_rate: bool
+        :param component_mass_rate: Plot component mass rates, default is True
+        :type component_mass_rate: bool
+        :param energy_rate: Plot energy rates for thermal scenarios, default is True
+        :type energy_rate: bool
+        :param energy_rate_relative_to_dead_state: Plot energy rates relative to the
             dead state for thermal scenarios, default is False
-        :type energy_rates_relative_to_dead_state: bool
+        :type energy_rate_relative_to_dead_state: bool
         """
         main_dir = os.path.join(self.output_folder, "figures/well_time_plots")
 
@@ -2832,15 +2832,15 @@ class Output:
 
         # Store types of well rates in a list to be plotted
         rate_types = []
-        rate_types += ["phase_molar_rate"] if phase_molar_rates else []
-        rate_types += ["phase_mass_rate"] if phase_mass_rates else []
-        rate_types += ["phase_volumetric_rate"] if phase_volumetric_rates else []
-        rate_types += ["component_molar_rate"] if component_molar_rates else []
-        rate_types += ["component_mass_rate"] if component_mass_rates else []
-        rate_types += ["energy_rate"] if energy_rates and self.thermal else []
+        rate_types += ["phase_molar_rate"] if phase_molar_rate else []
+        rate_types += ["phase_mass_rate"] if phase_mass_rate else []
+        rate_types += ["phase_volumetric_rate"] if phase_volumetric_rate else []
+        rate_types += ["component_molar_rate"] if component_molar_rate else []
+        rate_types += ["component_mass_rate"] if component_mass_rate else []
+        rate_types += ["energy_rate"] if energy_rate and self.thermal else []
         rate_types += (
             ["energy_rate_relative_to_dead_state"]
-            if energy_rates_relative_to_dead_state and self.thermal
+            if energy_rate_relative_to_dead_state and self.thermal
             else []
         )
 
