@@ -23,10 +23,10 @@ from darts.tools.vtk_io import write_lines_vtp, write_pvd
 DEAD_STATE_PRESSURE = 1.01325  # bar (1 atm)
 DEAD_STATE_TEMPERATURE = 273.15 + 15.0  # K (15 deg C)
 
-ENERGY_RATE_TYPES = {
-    "energy_rates": "energy_rate",
-    "energy_rates_relative_to_dead_state": "energy_rate_relative_to_dead_state",
-}
+ENERGY_RATE_TYPES = (
+    "energy_rate",
+    "energy_rate_relative_to_dead_state",
+)
 
 # ── Picklable accessors for output-property dicts ─────────────────────────────
 # Replace the per-region lambdas used by set_phase_properties / filter_phase_props
@@ -2147,14 +2147,14 @@ class Output:
 
         # Store types of well rates in a list to be calculated
         rate_types = []
-        rate_types += ["phase_molar_rates"] if phase_molar_rates else []
-        rate_types += ["phase_mass_rates"] if phase_mass_rates else []
-        rate_types += ["phase_volumetric_rates"] if phase_volumetric_rates else []
-        rate_types += ["component_molar_rates"] if component_molar_rates else []
-        rate_types += ["component_mass_rates"] if component_mass_rates else []
-        rate_types += ["energy_rates"] if energy_rates and self.thermal else []
+        rate_types += ["phase_molar_rate"] if phase_molar_rates else []
+        rate_types += ["phase_mass_rate"] if phase_mass_rates else []
+        rate_types += ["phase_volumetric_rate"] if phase_volumetric_rates else []
+        rate_types += ["component_molar_rate"] if component_molar_rates else []
+        rate_types += ["component_mass_rate"] if component_mass_rates else []
+        rate_types += ["energy_rate"] if energy_rates and self.thermal else []
         rate_types += (
-            ["energy_rates_relative_to_dead_state"]
+            ["energy_rate_relative_to_dead_state"]
             if energy_rates_relative_to_dead_state and self.thermal
             else []
         )
@@ -2305,10 +2305,9 @@ class Output:
                             f'{tag}_{rate_type.split("_")[1]}_rate_{pc.components_name[c_idx]}'
                         ] = arr
                 elif rate_type in ENERGY_RATE_TYPES:
-                    stem = ENERGY_RATE_TYPES[rate_type]
                     for phase_idx, phase_name in enumerate(pc.phases_name):
                         arr = rates_perfs[:, total_perf_idx, phase_idx]
-                        time_data_dict[f"{tag}_{stem}_{phase_name}"] = arr
+                        time_data_dict[f"{tag}_{rate_type}_{phase_name}"] = arr
                 total_perf_idx += 1
 
     def store_perf_rate_sums(
@@ -2355,13 +2354,14 @@ class Output:
                     ] = total
                 total_perf_idx += len(well.perforations)
             elif rate_type in ENERGY_RATE_TYPES:
-                stem = ENERGY_RATE_TYPES[rate_type]
                 for phase_idx, phase_name in enumerate(pc.phases_name):
                     total = sum(
                         rates_perfs[:, total_perf_idx + j, phase_idx]
                         for j in range(len(well.perforations))
                     )
-                    time_data_dict[f"{tag}_{stem}_{phase_name}_by_sum_perfs"] = total
+                    time_data_dict[f"{tag}_{rate_type}_{phase_name}_by_sum_perfs"] = (
+                        total
+                    )
                 total_perf_idx += len(well.perforations)
 
     def store_wellhead_rates(
@@ -2395,9 +2395,8 @@ class Output:
                         f'{tag}_{rate_type.split("_")[1]}_rate_{c_name}_at_wh'
                     ] = arr
             elif rate_type in ENERGY_RATE_TYPES:
-                stem = ENERGY_RATE_TYPES[rate_type]
                 for phase_idx, phase_name in enumerate(pc.phases_name):
-                    time_data_dict[f"{tag}_{stem}_{phase_name}_at_wh"] = wh_rates[
+                    time_data_dict[f"{tag}_{rate_type}_{phase_name}_at_wh"] = wh_rates[
                         :, well_idx, phase_idx
                     ]
 
@@ -2657,9 +2656,9 @@ class Output:
         upwind_m = phase_p_diff.reshape(batch_size, pc.nph) < 0
 
         if rate_type in [
-            "phase_molar_rates",
-            "phase_mass_rates",
-            "phase_volumetric_rates",
+            "phase_molar_rate",
+            "phase_mass_rate",
+            "phase_volumetric_rate",
             *ENERGY_RATE_TYPES,
         ]:
             well_ops_m = evaluate_ops(
@@ -2668,33 +2667,33 @@ class Output:
             well_ops_p = evaluate_ops(
                 states_p_2d, n_well_ctrl_ops, physics.well_ctrl_itor
             )
-        elif rate_type not in ["component_molar_rates", "component_mass_rates"]:
+        elif rate_type not in ["component_molar_rate", "component_mass_rate"]:
             raise Exception(
                 "The rate type is not entered correctly or is not supported!"
             )
 
-        if rate_type == "phase_molar_rates":
+        if rate_type == "phase_molar_rate":
             start = int(well_control_iface.MOLAR_RATE) * pc.nph
             ops = np.where(
                 upwind_m,
                 well_ops_m[:, start : start + pc.nph],
                 well_ops_p[:, start : start + pc.nph],
             )
-        elif rate_type == "phase_mass_rates":
+        elif rate_type == "phase_mass_rate":
             start = int(well_control_iface.MASS_RATE) * pc.nph
             ops = np.where(
                 upwind_m,
                 well_ops_m[:, start : start + pc.nph],
                 well_ops_p[:, start : start + pc.nph],
             )
-        elif rate_type == "phase_volumetric_rates":
+        elif rate_type == "phase_volumetric_rate":
             op_start = int(well_control_iface.VOLUMETRIC_RATE) * pc.nph
             ops = np.where(
                 upwind_m,
                 well_ops_m[:, op_start : op_start + pc.nph],
                 well_ops_p[:, op_start : op_start + pc.nph],
             )
-        elif rate_type == "component_molar_rates":
+        elif rate_type == "component_molar_rate":
             op_start = reservoir_operator.FLUX_OP
             flux_ops_m = reservoir_ops_m[:, op_start : op_start + ne * pc.nph]
             flux_ops_p = reservoir_ops_p[:, op_start : op_start + ne * pc.nph]
@@ -2712,7 +2711,7 @@ class Output:
             molar_ops = molar_ops.reshape(batch_size, pc.nph * pc.nc_fl)
 
             ops = molar_ops
-        elif rate_type == "component_mass_rates":
+        elif rate_type == "component_mass_rate":
             op_start = reservoir_operator.FLUX_OP
             flux_ops_m = reservoir_ops_m[:, op_start : op_start + ne * pc.nph]
             flux_ops_p = reservoir_ops_p[:, op_start : op_start + ne * pc.nph]
@@ -2740,7 +2739,7 @@ class Output:
                 well_ops_p[:, op_start : op_start + pc.nph],
             )
 
-            if rate_type == "energy_rates_relative_to_dead_state":
+            if rate_type == "energy_rate_relative_to_dead_state":
                 molar_rate_start = int(well_control_iface.MOLAR_RATE) * pc.nph
                 molar_ops = np.where(
                     upwind_m,
@@ -2767,18 +2766,18 @@ class Output:
 
         # Reshape arrays
         if rate_type in [
-            "phase_molar_rates",
-            "phase_mass_rates",
-            "phase_volumetric_rates",
+            "phase_molar_rate",
+            "phase_mass_rate",
+            "phase_volumetric_rate",
         ]:
             ops_reshaped = ops.reshape(n_ts, n_conns, pc.nph)
-        elif rate_type in ["component_molar_rates", "component_mass_rates"]:
+        elif rate_type in ["component_molar_rate", "component_mass_rate"]:
             ops_reshaped = ops.reshape(n_ts, n_conns, -1)
         elif rate_type in ENERGY_RATE_TYPES:
             ops_reshaped = ops.reshape(n_ts, n_conns, pc.nph)
 
         tran = trans[None, :, None]
-        if rate_type in ["component_molar_rates", "component_mass_rates"]:
+        if rate_type in ["component_molar_rate", "component_mass_rate"]:
             pressure_term = np.repeat(phase_p_diff, pc.nc_fl, axis=2)
         else:
             pressure_term = phase_p_diff
@@ -2833,14 +2832,14 @@ class Output:
 
         # Store types of well rates in a list to be plotted
         rate_types = []
-        rate_types += ["phase_molar_rates"] if phase_molar_rates else []
-        rate_types += ["phase_mass_rates"] if phase_mass_rates else []
-        rate_types += ["phase_volumetric_rates"] if phase_volumetric_rates else []
-        rate_types += ["component_molar_rates"] if component_molar_rates else []
-        rate_types += ["component_mass_rates"] if component_mass_rates else []
-        rate_types += ["energy_rates"] if energy_rates and self.thermal else []
+        rate_types += ["phase_molar_rate"] if phase_molar_rates else []
+        rate_types += ["phase_mass_rate"] if phase_mass_rates else []
+        rate_types += ["phase_volumetric_rate"] if phase_volumetric_rates else []
+        rate_types += ["component_molar_rate"] if component_molar_rates else []
+        rate_types += ["component_mass_rate"] if component_mass_rates else []
+        rate_types += ["energy_rate"] if energy_rates and self.thermal else []
         rate_types += (
-            ["energy_rates_relative_to_dead_state"]
+            ["energy_rate_relative_to_dead_state"]
             if energy_rates_relative_to_dead_state and self.thermal
             else []
         )
@@ -2941,12 +2940,11 @@ class Output:
         keys = []
         tag = f"well_{well_name}_perf_{perf_idx}_"
         if rtype in ENERGY_RATE_TYPES:
-            stem = ENERGY_RATE_TYPES[rtype]
-            label = stem.replace("_", " ")
+            label = rtype.replace("_", " ")
             for phase_name in pc.phases_name:
                 keys.append(
                     (
-                        f"{tag}{stem}_{phase_name}",
+                        f"{tag}{rtype}_{phase_name}",
                         f"{phase_name} {label} [kJ/day]",
                     )
                 )
@@ -2979,17 +2977,16 @@ class Output:
         keys = []
         base = f"well_{well_name}_"
         if rtype in ENERGY_RATE_TYPES:
-            stem = ENERGY_RATE_TYPES[rtype]
-            label = stem.replace("_", " ")
+            label = rtype.replace("_", " ")
             for phase_name in pc.phases_name:
                 keys.extend(
                     [
                         (
-                            f"{base}{stem}_{phase_name}_by_sum_perfs",
+                            f"{base}{rtype}_{phase_name}_by_sum_perfs",
                             f"{phase_name} {label} [kJ/day]",
                         ),
                         (
-                            f"{base}{stem}_{phase_name}_at_wh",
+                            f"{base}{rtype}_{phase_name}_at_wh",
                             f"{phase_name} {label} [kJ/day]",
                         ),
                     ]
