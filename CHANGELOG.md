@@ -43,7 +43,14 @@
     - checked in the pipelines (`rect_17x17x15`);
     - `main_proxy.py` renamed to `main_nucleus_of_strain.py`, hexahedral meshes only;
     - added README.md.
+- Output:
+  - `store_well_time_data()` and `plot_well_time_data()` report well energy rates in two ways: `energy_rate` (default) is the phase flow times its enthalpy, and the optional `energy_rate_relative_to_dead_state` is the flow times its enthalpy rise above the dead state (1 atm, 15 deg C). ([`c4e5db76`](https://gitlab.com/open-darts/open-darts/-/commit/c4e5db76))
+  - Fixed the dead-state subtraction of the advective heat rate. ([`46d32684`](https://gitlab.com/open-darts/open-darts/-/commit/46d32684))
 - Breaking changes:
+  - The `advective_heat_rates` argument of `store_well_time_data()` and `plot_well_time_data()` is replaced by two arguments, and every rate selection argument is now singular, matching the keys it produces:\
+  {- Before: m.output.store_well_time_data(phase_molar_rates=True, advective_heat_rates=True) -}\
+  {+ Now:    m.output.store_well_time_data(phase_molar_rate=True, energy_rate=True, energy_rate_relative_to_dead_state=False) +}
+  - The `advective_heat_rate_<phase>` well time-series keys are renamed to `energy_rate_<phase>`, with `energy_rate_relative_to_dead_state_<phase>` for the dead-state variant. ([`45494939`](https://gitlab.com/open-darts/open-darts/-/commit/45494939))
   - Results of `mech_discretizer` models change in boundary cells. Mechanics engines no longer expose `N_VARS`; use `engine.get_n_vars()`. Results of models with multi-segment wells in `mech_discretizer` change. `UnstructReservoirMech.add_well(name, depth)` is now `add_well(well_name)`, and `add_perforation(well, res_cell_idx, well_index)` is now `add_perforation(well_name, res_cell_idx, ..., well_index=...)` (the well name instead of the `ms_well` object; `well_index` is required). [!323](https://gitlab.com/open-darts/open-darts/-/merge_requests/323)
   - Results of `mech_discretizer` models with Biot or thermal-expansion contrasts, and of models using the default `init_gravity()`, change. Layered models that start from non-zero pressure or temperature should be initialized with `set_equilibrium`. ([!355](https://gitlab.com/open-darts/open-darts/-/merge_requests/355))
 

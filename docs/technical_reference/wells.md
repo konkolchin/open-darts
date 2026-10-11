@@ -9,7 +9,7 @@
 * Molar rate: kmol/day
 * Mass rate: kg/day
 * Volumetric rate: m^3/day
-* Advective heat rate: kJ/day
+* Energy rate: kJ/day
 
 
 ### Well Time Data Key Guide
@@ -35,7 +35,7 @@ Where:
   * `molar`
   * `mass`
   * `volumetric`
-  * `advective_heat`
+  * `energy`
 * `<phase_or_component_name>` is taken from the phase names (e.g., `water`, `gas`, `oil`) or component names (e.g., `CO2`, `C1`).
 
 
@@ -43,7 +43,15 @@ Examples:
 
 * `well_I1_perf_0_molar_rate_gas`
 * `well_P1_perf_2_mass_rate_C1`
-* `well_I2_perf_1_advective_heat_rate_water`
+* `well_I2_perf_1_energy_rate_water`
+
+Energy rates relative to the dead state do not take a `<rate_type>` and are named in full:
+
+`well_<well_name>_perf_<perf_number>_energy_rate_relative_to_dead_state_<phase_name> `
+
+Example:
+
+* `well_I2_perf_1_energy_rate_relative_to_dead_state_water`
 
 
 ---
@@ -58,7 +66,8 @@ Examples:
 
 * `well_I1_molar_rate_gas_by_sum_perfs`
 * `well_P1_mass_rate_C1_by_sum_perfs`
-* `well_I2_advective_heat_rate_water_by_sum_perfs`
+* `well_I2_energy_rate_water_by_sum_perfs`
+* `well_I2_energy_rate_relative_to_dead_state_water_by_sum_perfs`
 
 
 ---
@@ -73,7 +82,8 @@ Examples:
 
 * `well_I1_molar_rate_gas_at_wh`
 * `well_P1_mass_rate_C1_at_wh`
-* `well_I2_advective_heat_rate_water_at_wh`
+* `well_I2_energy_rate_water_at_wh`
+* `well_I2_energy_rate_relative_to_dead_state_water_at_wh`
 
 
 ---
@@ -94,12 +104,32 @@ Examples:
 
 ---
 
+### Selecting Which Rates Are Stored
+
+`store_well_time_data()` and `plot_well_time_data()` take one boolean per rate type.
+Each argument is named after the keys it produces, so `energy_rate=True` yields the
+`..._energy_rate_<phase>` series:
+
+| Argument | Default | Quantity |
+| --- | --- | --- |
+| `phase_molar_rate` | `True` | phase molar flow |
+| `phase_mass_rate` | `True` | phase mass flow |
+| `phase_volumetric_rate` | `True` | phase volumetric flow |
+| `component_molar_rate` | `True` | component molar flow |
+| `component_mass_rate` | `True` | component mass flow |
+| `energy_rate` | `True` | phase flow times its enthalpy |
+| `energy_rate_relative_to_dead_state` | `False` | phase flow times its enthalpy rise above the dead state |
+
 ### Notes
 
 * Molar rates are not valid for dead-oil models.
 * `BHT` is available for thermal scenarios; otherwise, it is a constant set to the initial reservoir temperature.
-* `advective_heat` is only available for thermal scenarios.
-* For advective heat rate, the following dead state (reference state for energy injection or production) is used:
+* Both energy rates are only available for thermal scenarios.
+* `energy_rate` uses no dead state, so its value is shifted by whatever zero the
+  enthalpy correlation of the model uses. Differences between two times or two wells are
+  meaningful; a single absolute value is only meaningful together with that correlation.
+* `energy_rate_relative_to_dead_state` subtracts the enthalpy of the same flowing phase
+  composition at the dead state, so it does not depend on that zero. The dead state is:
   * P = 1 atm;
   * T = 15 deg C.
 
