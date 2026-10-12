@@ -74,6 +74,8 @@ class OperatorsBase(operator_set_evaluator_iface):
         super().__init__()
 
         self.property = property_container
+        # Describe this operator's input, not just the shared property container.
+        self.n_history = getattr(property_container, 'n_history', 0)
 
         self.thermal = thermal
 
@@ -261,13 +263,13 @@ class OperatorsBase(operator_set_evaluator_iface):
         When composition lies outside the simplex (∑ z_i ≠ 1 or some z_i < 0), perform exact hyperplane extrapolation:
         Fit each operator value via val = a·z + c through exactly d+1 valid reference points ,
         then evaluate at the out‑of‑bounds composition. Pressure (and temperature) remain constant.
-        State layout: [ p, z₁, …, z_d, (T), (h₁, …, h_n) ] with n = property.n_history OBL history variables,
+        State layout: [ p, z₁, …, z_d, (T), (h₁, …, h_n) ] with n = self.n_history OBL history variables,
         which are kept constant as well.
         """
         # Unpack state; OBL history variables (e.g. sg_max) trail the primary state and are carried
         # unchanged into every reference state
         vec = state.to_numpy()
-        n_history = getattr(self.property, 'n_history', 0)
+        n_history = self.n_history
         history = vec[len(vec) - n_history :] if n_history else np.empty(0)
         if n_history:
             vec = vec[: len(vec) - n_history]
@@ -601,6 +603,8 @@ class ThermalVarOperator(OperatorsBase):
 
         self.n_ops = 1
         self.is_pt = is_pt
+        # The thermal-variable interpolator consumes primary PT state only.
+        self.n_history = 0
 
     def evaluate(self, state_pt, values):
         # Check if extrapolation needs to be applied
@@ -613,7 +617,7 @@ class ThermalVarOperator(OperatorsBase):
         if not self.thermal:
             values_np[0] = self.property.temperature
         elif self.is_pt:
-            values_np[0] = state_pt[-1]
+            values_np[0] = state_pt[self.nc]
         else:
             values_np[0] = self.property.compute_total_enthalpy(state_pt=state_pt)
 
