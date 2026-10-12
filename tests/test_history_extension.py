@@ -126,3 +126,55 @@ def test_physics_history_fields_round_trip() -> None:
 
     physics.history.fields = None
     assert physics.history.n_fields == 0
+
+
+def test_extrapolation_keeps_history_variables() -> None:
+    """Boundary extrapolation of a state with OBL history variables: the history value is not
+    a composition and every reference state carries it unchanged."""
+    from darts.engines import value_vector
+    from darts.physics.base.operator_evaluator import OperatorsBase
+
+    class LinearOperators(OperatorsBase):
+        """Two operators: a linear function of the compositions, and the history value."""
+
+        def __init__(self, prop):
+            super().__init__(prop, thermal=False, extrapolation_flag=True, dz=0.01)
+            self.n_ops = 2
+            self.reference_states = []
+
+        def evaluate(self, state, values):
+            if self.apply_extrapolation(state, values):
+                return 0
+            s = state.to_numpy()
+            self.reference_states.append(s.copy())
+            out = values.to_numpy()
+            out[0] = 1.0 + 2.0 * s[1] + 3.0 * s[2]
+            out[1] = s[-1]
+            return 0
+
+    prop = SimpleNamespace(nc=3, nph=2, eps_z=1e-10, n_history=1)
+    ops = LinearOperators(prop)
+    # z_last = 1 - 0.6 - 0.45 < 0: outside the composition simplex, history value 0.3
+    state = value_vector([50.0, 0.6, 0.45, 0.3])
+    values = value_vector([0.0, 0.0])
+    ops.evaluate(state, values)
+
+    np.testing.assert_allclose(values.to_numpy(), [1.0 + 2.0 * 0.6 + 3.0 * 0.45, 0.3])
+    assert ops.reference_states
+    for ref in ops.reference_states:
+        assert ref.size == 4
+        assert ref[-1] == 0.3
+        assert 1.0 - ref[1] - ref[2] >= -1e-12
+
+
+def test_three_phase_history_interpolator_templates() -> None:
+    """Three-phase physics with one or two OBL history axes needs interpolators with
+    N_DIMS = N_VARS + n_history at the operator count of N_VARS."""
+    import darts.interpolators as itors
+
+    n_phases = 3
+    for n_vars in (2, 3, 4, 5):
+        n_ops = n_vars * (2 * n_phases + 2) + 7 * n_phases + 3
+        for n_history in (1, 2):
+            name = f"multilinear_cpu_interpolator_d_{n_vars + n_history}_{n_ops}"
+            assert hasattr(itors, name), name

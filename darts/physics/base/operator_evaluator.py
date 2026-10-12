@@ -261,10 +261,16 @@ class OperatorsBase(operator_set_evaluator_iface):
         When composition lies outside the simplex (∑ z_i ≠ 1 or some z_i < 0), perform exact hyperplane extrapolation:
         Fit each operator value via val = a·z + c through exactly d+1 valid reference points ,
         then evaluate at the out‑of‑bounds composition. Pressure (and temperature) remain constant.
-        State layout: [ p, z₁, …, z_d, (T) ]
+        State layout: [ p, z₁, …, z_d, (T), (h₁, …, h_n) ] with n = property.n_history OBL history variables,
+        which are kept constant as well.
         """
-        # Unpack state
+        # Unpack state; OBL history variables (e.g. sg_max) trail the primary state and are carried
+        # unchanged into every reference state
         vec = state.to_numpy()
+        n_history = getattr(self.property, 'n_history', 0)
+        history = vec[len(vec) - n_history :] if n_history else np.empty(0)
+        if n_history:
+            vec = vec[: len(vec) - n_history]
         if self.thermal:
             p, T = vec[0], vec[-1]
             z = vec[1:-1].copy()
@@ -375,9 +381,9 @@ class OperatorsBase(operator_set_evaluator_iface):
         vals_list = []
         for zp in supporting_points:
             if self.thermal:
-                ref_state = value_vector(np.concatenate(([p], zp, [T])))
+                ref_state = value_vector(np.concatenate(([p], zp, [T], history)))
             else:
-                ref_state = value_vector(np.concatenate(([p], zp)))
+                ref_state = value_vector(np.concatenate(([p], zp, history)))
             ref_vals = value_vector(np.zeros(self.n_ops))
             self.evaluate(ref_state, ref_vals)
             zps_list.append(zp)
