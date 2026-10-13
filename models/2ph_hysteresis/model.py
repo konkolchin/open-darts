@@ -340,7 +340,7 @@ class Model(DartsModel):
                 phases_name=phases,
                 components_name=components,
                 Mw=comp_data.Mw,
-                temperature=temperature,
+                temperature=None if thermal else temperature,
                 rock_comp=0,
                 eps_z=zero / 10.0,
             )
