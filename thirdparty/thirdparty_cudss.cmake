@@ -17,6 +17,27 @@ if(TARGET cudss::cudss)
   return()
 endif()
 
+# NVIDIA's licence goes with the bundled library: its terms allow redistributing
+# cuDSS only as part of an application and with their notice. It lies next to the
+# library: in the pip wheel's dist-info, or at the root of the redistributable tarball.
+function(_cudss_bundle_license library)
+  get_filename_component(_root "${library}" DIRECTORY)
+  get_filename_component(_root "${_root}" DIRECTORY)
+  # pip wheel: <site-packages>/nvidia/cu*/lib/libcudss.so.0. Its own dist-info first, as
+  # other NVIDIA wheels share nvidia/cu*/.
+  file(GLOB _license "${_root}/../../nvidia_cudss_cu*.dist-info/licenses/LICENSE*")
+  if(NOT _license)
+    # redistributable tarball: <root>/lib/libcudss.so.0 and <root>/LICENSE
+    file(GLOB _license "${_root}/LICENSE*")
+  endif()
+  if(_license)
+    list(GET _license 0 _license)
+    install(FILES "${_license}" DESTINATION "${CMAKE_INSTALL_PREFIX}/linear_solvers" RENAME LICENSE.cuDSS.txt)
+  else()
+    message(WARNING "cuDSS licence not found near ${library}: libcudss is bundled without it")
+  endif()
+endfunction()
+
 if(NOT CUDSS_ROOT AND DEFINED ENV{CUDSS_ROOT})
   set(CUDSS_ROOT "$ENV{CUDSS_ROOT}")
 endif()
@@ -29,6 +50,8 @@ if(cudss_FOUND AND TARGET cudss)
   # manual-discovery branch installed it, so a CONFIG-package build produced
   # a wheel without libcudss (see the bundling comment below).
   install(FILES "$<TARGET_FILE:cudss>" DESTINATION "${CMAKE_INSTALL_PREFIX}/linear_solvers")
+  get_target_property(_cudss_location cudss LOCATION)
+  _cudss_bundle_license("${_cudss_location}")
   message(STATUS "  cuDSS: found via CONFIG package (${cudss_DIR})")
   return()
 endif()
@@ -92,6 +115,7 @@ add_library(cudss::cudss ALIAS cudss_imported)
 # since the versioned soname is not matched by the '*.so' glob) makes the wheel
 # self-contained, with no LD_LIBRARY_PATH. (mirrors the libamgxsh / IPhreeqc bundling.)
 install(FILES "${CUDSS_LIBRARY}" DESTINATION "${CMAKE_INSTALL_PREFIX}/linear_solvers")
+_cudss_bundle_license("${CUDSS_LIBRARY}")
 
 message(STATUS "  cuDSS: ${CUDSS_LIBRARY} (includes: ${CUDSS_INCLUDE_DIR})")
 unset(_cudss_hint_dirs)

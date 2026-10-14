@@ -13,8 +13,10 @@
         TEST_GPU: '1'
         PY_VER: $DEFAULT_PY_VER
         CONDA_ENV: "darts_gpu_${CI_JOB_ID}"
-        # cuDSS GPU direct solver: NOT built in CI by default. The oahu job
-        # overrides this to '--cudss' and pip-installs the prebuilt cuDSS library.
+        # cuDSS GPU direct solver: off by default. The oahu job overrides this to
+        # '--cudss' and pip-installs the prebuilt cuDSS library;
+        # build-linux-tahiti-image-gpu, the runtime image's wheel, builds with it in
+        # its own script.
         CUDSS_FLAG: '--no-cudss'
     script:
         - echo "build *.so on linux GPU started with ODLS=$ODLS"
@@ -89,19 +91,25 @@ build-linux-tahiti-image-gpu:
         name: "apptainer"
         entrypoint: [""]
     needs:
-        - job: apptainer-image-builder
+        - job: apptainer-builder-gpu-image
           artifacts: true
     variables:
         # Job-private conda package cache (same fix as pre-commit/gitingest):
-        # the image's conda uses the shared /data/gitlab-runner/miniconda3/pkgs/
-        # cache (runner ~/.condarc), and concurrent jobs racing on it break each
-        # other's downloads/extractions (incl. the Reaktoro conda install).
-        CONDA_PKGS_DIRS: "${CI_PROJECT_DIR}/.conda-pkgs"
+        # concurrent jobs racing on a shared cache break each other's
+        # downloads/extractions (incl. the Reaktoro conda install), and the
+        # image's default, /tmp/conda-pkgs-<uid>, is shared by every job of the
+        # runner user and thinned out by the host's /tmp cleanup. APPTAINERENV_,
+        # since a plain CONDA_PKGS_DIRS loses to the one the image's %environment
+        # sets.
+        APPTAINERENV_CONDA_PKGS_DIRS: "${CI_PROJECT_DIR}/.conda-pkgs"
+        # The cuDSS direct solver of the wheel and so of the GPU runtime image: the CUDA 12
+        # build (sm_50 to sm_120 + PTX). Keep in sync with build_runtime_image.sh.
+        CUDSS_VERSION: "0.8.0.10"
     before_script:
         - |
           set -euo pipefail
           if [ -z "${APPTAINER_IMAGE:-}" ]; then
-            echo "APPTAINER_IMAGE is not set (expected from apptainer-image-builder dotenv artifact)"
+            echo "APPTAINER_IMAGE is not set (expected from apptainer-builder-gpu-image dotenv artifact)"
             exit 1
           fi
           if [ ! -f "$APPTAINER_IMAGE" ]; then
@@ -116,7 +124,9 @@ build-linux-tahiti-image-gpu:
         - |
           apptainer exec --nv "$APPTAINER_IMAGE" bash -lc "
             source /opt/conda/etc/profile.d/conda.sh \
-            && conda create -n ${CONDA_ENV} python=${PY_VER} -q -y
+            && conda create -n ${CONDA_ENV} python=${PY_VER} -q -y \
+            && conda activate ${CONDA_ENV} \
+            && pip install -q nvidia-cudss-cu12==${CUDSS_VERSION}
           "
     script:
         - echo "🚀 Building DARTS GPU libs inside '${CONDA_ENV}'…"
@@ -131,9 +141,19 @@ build-linux-tahiti-image-gpu:
                 # open-source build only
                 unset GSELINSOLVERSPATH && \
                 export OD_CMAKE_ARGS='-D ENABLE_BOS_SOLVERS=OFF' && \
-                # _this_ is your real build (--no-cudss: cuDSS not built in CI)
-                ./helper_scripts/build_install_darts_gpu.sh -c -p --no-cudss -j 16
+                # _this_ is your real build, with the cuDSS installed above
+                ./helper_scripts/build_install_darts_gpu.sh -c -p --cudss -j 16
             "
+        - |
+          # Guard: the wheel bundles cuDSS. A build that does not find it only warns
+          # and leaves it out, which would silently drop it from the runtime image.
+          python3 - dist/*.whl <<'EOF'
+          import sys, zipfile
+          names = zipfile.ZipFile(sys.argv[1]).namelist()
+          missing = [n for n in ("darts/linear_solvers/libcudss.so.0", "darts/linear_solvers/LICENSE.cuDSS.txt")
+                     if n not in names]
+          sys.exit(f"FAILED: the wheel lacks {missing}" if missing else 0)
+          EOF
         - |
           # Guard: this job must ship an open-source-solver wheel. CMakeCache is
           # what the build actually configured with, so assert on it rather than

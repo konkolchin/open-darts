@@ -269,18 +269,18 @@ def gen_fault_msh_no_damage_zone(fault=False, mesh_dir='no_damage_zone', mesh_ro
                 p_bot = geo.addPoint(wx, wy, Z2, mult1 * lc)
                 p_top = geo.addPoint(wx, wy, Z1, mult1 * lc)
                 well_lines.append(geo.addLine(p_bot, p_top))
-    
+
             geo.synchronize()
             vol_tags = [v for (dim, v) in gmsh.model.getEntities(3)]
             for l in well_lines:
                 gmsh.model.mesh.embed(1, [l], 3, vol_tags)
-    
+
             thr_fields = []
             for l in well_lines:
                 fdist = gmsh.model.mesh.field.add("Distance")
                 gmsh.model.mesh.field.setNumbers(fdist, "CurvesList", [l])
                 gmsh.model.mesh.field.setNumber(fdist, "Sampling", 10000)
-    
+
                 fthr = gmsh.model.mesh.field.add("Threshold")
                 gmsh.model.mesh.field.setNumber(fthr, "InField", fdist)
                 gmsh.model.mesh.field.setNumber(fthr, "SizeMin", max(1.0, 0.05 * lc))
@@ -289,7 +289,7 @@ def gen_fault_msh_no_damage_zone(fault=False, mesh_dir='no_damage_zone', mesh_ro
                 gmsh.model.mesh.field.setNumber(fthr, "DistMax", 10.0)
                 gmsh.model.mesh.field.setNumber(fthr, "StopAtDistMax", 1)
                 thr_fields.append(fthr)
-    
+
             f_all = thr_fields[0] if len(thr_fields) == 1 else gmsh.model.mesh.field.add("Min")
             if len(thr_fields) > 1:
                 gmsh.model.mesh.field.setNumbers(f_all, "FieldsList", thr_fields)
@@ -334,4 +334,3 @@ if __name__ == '__main__':
     mesh = homog().mesh
     for fault in (False, True):
         gen_fault_msh_no_damage_zone(fault=fault, bnd_tags=mesh.bnd_tags, matrix_tags=mesh.matrix_tags, fault_tag=mesh.fault_tag)
-

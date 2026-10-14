@@ -17,6 +17,7 @@ Welcome to open-DARTS documentation!
    :caption: GETTING STARTED
 
    getting_started/installation.md
+   containers/apptainer.md
    getting_started/tutorial.md
    getting_started/example_models.md
    getting_started/supported_features.md
@@ -29,6 +30,7 @@ Welcome to open-DARTS documentation!
    :caption: FOR DEVELOPERS
 
    for_developers/darts_gitlab_setup.md
+   for_developers/ci_cd_gpu_images.md
    for_developers/parallel_operators.md
 
 .. toctree::

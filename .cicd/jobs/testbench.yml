@@ -1,0 +1,48 @@
+# Model testbench runs (https://gitlab.com/open-darts/testbench) inside this pipeline's GPU runtime image.
+#
+# With RUN_TESTBENCH=1 (.gitlab-ci.yml, or set for the pipeline: web form, API or schedule) the job starts a pipeline
+# in open-darts/testbench whose gpu job (testbench .cicd/jobs/gpu.yml) runs on the tahiti runner, inside the SIF that
+# apptainer-runtime-gpu-image built here, and runs the variants of TESTBENCH_MODELS in the tiers of TESTBENCH_TIER
+# (defaults in .gitlab-ci.yml: all models, nightly and weekly), all on the GPU.
+# strategy: depend makes this job, and so this pipeline, fail when the testbench run fails.
+#
+# The image is passed as RUNTIME_IMAGE (that job's dotenv): the SIF apptainer-runtime-gpu-image built for this commit,
+# or reused when one with the same commit and recipe already exists. This job exists only in the pipelines that have
+# that job (same rules), and the testbench job checks that the image's VCS_REF is this commit.
+trigger-testbench:
+    stage: test
+    needs:
+        # the runtime image of this pipeline (built, or reused for the same commit and recipe), whose path arrives
+        # in the RUNTIME_IMAGE dotenv. Not optional: the rules below create this job only where that job exists.
+        - job: apptainer-runtime-gpu-image
+          artifacts: true
+        # after the GPU tests of this pipeline, also on tahiti: their CPU load would leave runs without a performance
+        # check (busy host), and the testbench is not started for a build whose GPU tests fail. Optional: that job
+        # exists in fewer pipelines than this one (e.g. not with RUN_RUNTIME_IMAGE=1 on an unprotected branch).
+        - job: test-apptainer-runtime-gpu
+          artifacts: false
+          optional: true
+    # only these global defaults: the rules below read RUN_TESTBENCH, and inherit also limits what they can see;
+    # the rest of this project's pipeline switches are not forwarded
+    inherit:
+        variables: [RUN_TESTBENCH, TESTBENCH_MODELS, TESTBENCH_TIER, TESTBENCH_VTK]
+    variables:
+        RUNTIME_IMAGE: $RUNTIME_IMAGE
+        OPEN_DARTS_PROJECT: $CI_PROJECT_PATH
+        OPEN_DARTS_COMMIT_SHA: $CI_COMMIT_SHA
+        OPEN_DARTS_REF: $CI_COMMIT_REF_NAME
+        OPEN_DARTS_PIPELINE_URL: $CI_PIPELINE_URL
+    trigger:
+        project: open-darts/testbench
+        branch: main
+        strategy: depend
+        forward:
+            yaml_variables: true
+            # so that TESTBENCH_* set for this pipeline (web form, API, schedule) override the defaults
+            pipeline_variables: true
+    rules:
+        - if: $RUN_TESTBENCH != "1"
+          when: never
+        # exactly the pipelines that have apptainer-runtime-gpu-image (MRs, protected refs, tags, TEST_CUSTOM_BRANCH, ...),
+        # so the testbench always runs this pipeline's image and never a fallback
+        - !reference [.apptainer-runtime-gpu-image-base, rules]

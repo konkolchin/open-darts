@@ -64,3 +64,9 @@ solution.pvd
 *.txt
 *.pvd
 *.vtp
+
+# container images and the staging context build_runtime_image.sh creates
+*.sif
+.cicd/build-linux/.context/
+.wheelbuild-env/
+.wheelbuild-pkgs/

@@ -18,7 +18,7 @@ def heter():
     idata.rock.E = np.array([E_sand, E_shale, E_shale])
 
     # Poisson ratio
-    nu_sand  = 0.20  
+    nu_sand  = 0.20
     nu_shale = 0.25
     idata.rock.nu = np.array([nu_sand, nu_shale, nu_shale])
 

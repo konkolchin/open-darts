@@ -94,7 +94,7 @@ def homog():
     rcond_sand  = 3.0 * 86.4  # [kJ/m/day/K]
     rcond_shale = 2.2 * 86.4  # [kJ/m/day/K]
     idata.rock.thermal_conductivity = np.array([rcond_sand, rcond_shale, rcond_shale])
-    
+
     idata.rock.E = 20.0 * 1e4   # [bars]
     # the Poisson ratio comes from base.py (0.25), and with it K0 = nu/(1-nu) = 1/3
 
