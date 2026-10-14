@@ -80,7 +80,7 @@ Set for one pipeline in the *Run pipeline* form, through the API or in a pipelin
 | `RUN_RUNTIME_IMAGE_DEPLOY` | unset | `1`: build the runtime image in portable mode and, on a protected ref, publish it as `<sha12>` |
 | `UPDATE_APPTAINER_IMAGE` | unset | `1`: rebuild the builder image even if one with the same key exists |
 | `UPDATE_RUNTIME_IMAGE` | unset | `1`: rebuild the runtime image even if one with the same key exists |
-| `RUN_TESTBENCH` | `1` | `1`: `trigger-testbench` runs the model testbench in this pipeline's runtime image |
+| `RUN_TESTBENCH` | `0` | `1`: `trigger-testbench` runs the model testbench in this pipeline's runtime image (set it for a scheduled, manual or API pipeline) |
 | `TESTBENCH_MODELS` | empty: all models | testbench models to run, space-separated |
 | `TESTBENCH_TIER` | `nightly weekly` | testbench tiers to run: all but the smoke tests (`mr`), the hours-long `full` tier and the unvalidated `manual` variants |
 | `TESTBENCH_VTK` | `1` | `1`: a VTK snapshot of every `DartsModel.run()` and an animation per variant, kept as testbench artefacts |

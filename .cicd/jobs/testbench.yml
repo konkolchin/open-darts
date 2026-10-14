@@ -1,9 +1,9 @@
 # Model testbench runs (https://gitlab.com/open-darts/testbench) inside this pipeline's GPU runtime image.
 #
-# With RUN_TESTBENCH=1 (.gitlab-ci.yml, or set for the pipeline: web form, API or schedule) the job starts a pipeline
-# in open-darts/testbench whose gpu job (testbench .cicd/jobs/gpu.yml) runs on the tahiti runner, inside the SIF that
-# apptainer-runtime-gpu-image built here, and runs the variants of TESTBENCH_MODELS in the tiers of TESTBENCH_TIER
-# (defaults in .gitlab-ci.yml: all models, nightly and weekly), all on the GPU.
+# Off by default (RUN_TESTBENCH=0 in .gitlab-ci.yml). With RUN_TESTBENCH=1 set for the pipeline (web form, API or
+# schedule) the job starts a pipeline in open-darts/testbench whose gpu job (testbench .cicd/jobs/gpu.yml) runs on the
+# tahiti runner, inside the SIF that apptainer-runtime-gpu-image built here, and runs the variants of TESTBENCH_MODELS
+# in the tiers of TESTBENCH_TIER (defaults in .gitlab-ci.yml: all models, nightly and weekly), all on the GPU.
 # strategy: depend makes this job, and so this pipeline, fail when the testbench run fails.
 #
 # The image is passed as RUNTIME_IMAGE (that job's dotenv): the SIF apptainer-runtime-gpu-image built for this commit,

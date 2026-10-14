@@ -44,14 +44,15 @@ variables:
   # in the existing pipeline, or push a commit / run a new pipeline to also get test_all_models.
   MR_NON_DRAFT: "0"
   # Model testbench (https://gitlab.com/open-darts/testbench) in the GPU runtime image, see .cicd/jobs/testbench.yml.
-  #   "0" -> not run
+  #   "0" (default) -> not run
   #   "1" -> trigger-testbench starts a testbench pipeline that runs the variants of TESTBENCH_MODELS (empty: all
   #          models) in the tiers of TESTBENCH_TIER (both space-separated), on tahiti inside this pipeline's runtime
   #          image, all on the GPU
+  # Set RUN_TESTBENCH=1 in a scheduled, manual or API pipeline to run it.
   # On its own the testbench runs the full models of spe10 (tiers nightly and weekly without the smoke tests) without
   # VTK; the values below run them for all models, with VTK. Other variables of its gpu job, such as
   # TESTBENCH_EXCLUDE_VARIANTS, can be set for a pipeline and are forwarded as well.
-  RUN_TESTBENCH: "1"
+  RUN_TESTBENCH: "0"
   TESTBENCH_MODELS: ""
   # all but the smoke tests (tier mr), the hours-long full tier and the unvalidated manual variants, licence-restricted
   # ones included (about 1 h 40 min with TESTBENCH_VTK)
