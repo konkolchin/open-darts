@@ -1,0 +1,451 @@
+# =============================================================================
+# open-DARTS GPU *runtime* image
+# =============================================================================
+# A slim, relocatable Apptainer image that runs open-DARTS models on NVIDIA GPUs.
+# It is deliberately NOT a build environment: see builder-gpu-image.def for that.
+#
+#   builder image (builder-gpu-image.def)   ->  compiles the wheel   ->  ~7 GB, CI only
+#   runtime image (this file)         ->  runs the wheel       ->  ~1.5 GB, portable
+#
+# Build it with .cicd/build-linux/build_runtime_image.sh, which produces the
+# portable wheel in the builder image and then assembles this one. Building it
+# by hand needs a wheel staged under .cicd/build-linux/.context/wheelhouse/ and
+# the repository root as the working directory (%files paths below are resolved
+# against the directory `apptainer build` is invoked from, not against this file).
+#
+# Why this image is small:
+#   * only the five CUDA libraries open-DARTS actually links are installed; the
+#     stock `-runtime` image also carries cuFFT, cuRAND, NPP, nvJPEG, NCCL and
+#     nvRTC, none of which any open-DARTS binary references
+#   * no toolchain, no nvcc, no conda, no CUDA static archives or headers
+#   * SIF is a flattened squashfs, so unlike Docker layers a %post deletion
+#     really does shrink the artifact
+#
+# Why this image is portable (the stock GPU build is not):
+#   * CUDA_ARCH ships cubins for several GPU generations plus a PTX fallback,
+#     instead of CMake's `native`, which emits code for the build host's GPU only
+#   * CPU_ARCH pins a host ISA baseline instead of `-march=native`, which bakes
+#     the build host's CPU into the binaries and SIGILLs on anything older
+#   * PYTHONNOUSERSITE stops the host's ~/.local site-packages, which Apptainer
+#     bind-mounts along with $HOME, from shadowing the image's own packages
+# =============================================================================
+
+Bootstrap: docker
+From: nvidia/cuda:{{ CUDA_VERSION }}-base-rockylinux8
+
+%arguments
+    # CUDA 12.8 is the default because it is the only toolkit that spans every
+    # GPU open-DARTS is run on: it still supports Volta (sm_70, dropped in CUDA
+    # 13) and already supports Blackwell (sm_100/sm_120). It also has the widest
+    # driver reach -- CUDA 12 minor-version compatibility means any r525+ driver
+    # will do. Override with CUDA_VERSION=13.0.2 for a ~35% smaller image that
+    # needs an r580+ driver and drops sm_70.
+    CUDA_VERSION=12.8.1
+    PY_VER=3.12
+    # Extras installed alongside the wheel. `test` pulls pytest so the image can
+    # run the model suite; add `viz` for vtk/pyvista (+~150 MB).
+    EXTRAS=test
+    # Informational only -- the wheel is compiled by build_runtime_image.sh.
+    # Recorded as labels so `apptainer inspect` reports what the image supports.
+    CUDA_ARCH=70-real;80-real;90-real;100-real;120-real;120-virtual
+    CPU_ARCH=x86-64-v3
+    DARTS_VERSION=unknown
+    VCS_REF=unknown
+    # NVIDIA's forward-compatibility libcuda, 307 MB, shipped by the base image.
+    # Kept by default: it is what lets this image run on a driver older than its
+    # CUDA needs, and %environment only puts it on the library path when the
+    # host driver really is too old. Set to 0 for the smallest possible image
+    # on a fleet whose drivers are known to be current.
+    KEEP_CUDA_COMPAT=1
+    # 1: the wheel must bundle the cuDSS direct solver (libcudss.so.0) with its licence;
+    # build_runtime_image.sh --no-cudss sets 0.
+    CUDSS=1
+
+%files
+    .cicd/build-linux/.context/wheelhouse /opt/wheelhouse
+
+%post
+    set -euo pipefail
+
+    CUDA_VERSION="{{ CUDA_VERSION }}"
+    PY_VER="{{ PY_VER }}"
+    EXTRAS="{{ EXTRAS }}"
+
+    # cuda-cudart-12-8, libcublas-12-8, ... -- the RPMs are named after the
+    # major-minor pair with a dash, so 12.8.1 becomes 12-8.
+    CUDA_PKG="$(echo "$CUDA_VERSION" | awk -F. '{print $1"-"$2}')"
+    CUDA_MAJOR="${CUDA_VERSION%%.*}"
+    echo "Assembling open-DARTS runtime on CUDA ${CUDA_VERSION} (package suffix ${CUDA_PKG})"
+
+    # -- the wheel decides which Python this image needs ----------------------
+    WHEEL=""
+    for w in /opt/wheelhouse/*.whl /opt/wheelhouse/*/*.whl; do
+        [ -f "$w" ] || continue
+        WHEEL="$w"
+        break
+    done
+    if [ -z "$WHEEL" ]; then
+        echo "FATAL: no wheel in /opt/wheelhouse. Stage one under" >&2
+        echo "       .cicd/build-linux/.context/wheelhouse/ , or use build_runtime_image.sh." >&2
+        exit 1
+    fi
+    WHEEL_PY="$(basename "$WHEEL" | sed -n 's/.*-cp\([0-9]\)\([0-9][0-9]*\)-cp[0-9][0-9]*-.*/\1.\2/p')"
+    if [ -n "$WHEEL_PY" ] && [ "$WHEEL_PY" != "$PY_VER" ]; then
+        echo "FATAL: $(basename "$WHEEL") is built for Python ${WHEEL_PY}, but this image" >&2
+        echo "       installs python${PY_VER}. Rebuild with --py-ver ${WHEEL_PY}" >&2
+        echo "       (build_runtime_image.sh derives this from the wheel automatically)." >&2
+        exit 1
+    fi
+    echo "Wheel $(basename "$WHEEL") targets Python ${WHEEL_PY:-unknown}; image venv is python${PY_VER}"
+
+    # -- refresh the distro layer ---------------------------------------------
+    # Two reasons. The obvious one: this image is shipped, so it should not
+    # carry the base layer's unpatched packages. The non-obvious one: the
+    # nvidia/cuda base images pin expat at 2.2.5, while Rocky 8 BaseOS has moved
+    # to 2.5.0 and its python3.12 build needs the newer one. The RPM dependency
+    # is only on the unversioned soname, so dnf is happy and the breakage lands
+    # at runtime instead, as
+    #     pyexpat...so: undefined symbol: XML_SetBillionLaughsAttackProtection...
+    # which surfaces as `python -m venv` failing inside ensurepip.
+    #
+    # The NVIDIA repo is disabled for this step so the pinned toolkit below
+    # cannot be dragged along. Excluding by *name* is the trap here: `libcu*`
+    # also matches libcurl, which leaves dnf with an unsatisfiable curl update
+    # and aborts the whole transaction.
+    dnf -y upgrade --disablerepo='cuda*'
+
+    # -- tooling this %post needs ---------------------------------------------
+    # The nvidia/cuda `base` image ships coreutils, binutils and glibc but not
+    # findutils, so the `find`/`xargs` calls below would abort the build with
+    # exit 127 (verified against nvidia/cuda:13.0.2-base-rockylinux8).
+    dnf -y install --setopt=install_weak_deps=False --setopt=tsflags=nodocs findutils
+
+    # -- CUDA runtime ---------------------------------------------------------
+    # Exactly the libraries the open-DARTS GPU binaries pull in, established by
+    # reading DT_NEEDED off engines/linear_solvers/libamgxsh:
+    #   libcudart  libcublas (-> libcublasLt)  libcusparse  libcusolver  libnvJitLink
+    # The closure is re-verified at the end of this section, so a future commit
+    # that starts using, say, cuFFT fails the image build instead of failing at
+    # the user's first GPU run.
+    dnf -y install --setopt=install_weak_deps=False --setopt=tsflags=nodocs \
+        "cuda-cudart-${CUDA_PKG}" \
+        "libcublas-${CUDA_PKG}" \
+        "libcusparse-${CUDA_PKG}" \
+        "libcusolver-${CUDA_PKG}" \
+        "libnvjitlink-${CUDA_PKG}"
+
+    # -- Python and the handful of system libraries the wheel needs -----------
+    # libgomp: OpenMP runtime for the engines and interpolators.
+    # mesa/libX*: gmsh dlopens them even headless, and meshio/matplotlib import
+    #   fontconfig/freetype. These are a few tens of MB in total.
+    # python*-pip-wheel is not optional here: RHEL patches ensurepip to install
+    # pip from that RPM instead of a bundled copy, and install_weak_deps=False
+    # keeps it out, so `python -m venv` fails with a bare non-zero ensurepip.
+    dnf -y install --setopt=install_weak_deps=False --setopt=tsflags=nodocs \
+        "python${PY_VER}" "python${PY_VER}-pip" "python${PY_VER}-pip-wheel" \
+        libgomp mesa-libGLU libXrender libX11 libXext libXi libXfixes \
+        libXcursor libXrandr libXinerama libXmu libXt libXft fontconfig freetype
+    # Python <= 3.11 also seeds setuptools from its own wheel RPM; 3.12 dropped
+    # setuptools from ensurepip, so the package does not exist there.
+    dnf -y install --setopt=install_weak_deps=False --setopt=tsflags=nodocs \
+        "python${PY_VER}-setuptools-wheel" 2>/dev/null || true
+
+    # -- strip the CUDA install down to shared objects ------------------------
+    # NVIDIA splits headers and static archives into the -devel subpackages, so
+    # the runtime RPMs above bring almost no dead weight; the `*.a` sweep is a
+    # guard in case that ever changes. The real saving is libcusolverMg, the
+    # ~110 MB multi-GPU cuSOLVER front-end that nothing in open-DARTS or AMGX
+    # references.
+    for d in /usr/local/cuda-*/targets/*/lib; do
+        [ -d "$d" ] || continue
+        find "$d" -maxdepth 1 -name '*.a' -delete
+        rm -f "$d"/libcusolverMg.so*
+    done
+    rm -rf /usr/local/cuda-*/targets/*/include /usr/local/cuda-*/nsight* \
+           /usr/local/cuda-*/nvvm /usr/local/cuda-*/tools
+    if [ "{{ KEEP_CUDA_COMPAT }}" != "1" ]; then
+        echo "-- dropping the CUDA forward-compatibility libraries"
+        rm -rf /usr/local/cuda-*/compat
+    fi
+    echo /usr/local/cuda/targets/x86_64-linux/lib > /etc/ld.so.conf.d/000-darts-cuda.conf
+    ldconfig
+
+    # -- open-DARTS ------------------------------------------------------------
+    # A venv rather than conda: conda's base environment alone is larger than
+    # everything else in this image put together, and nothing here needs it.
+    "python${PY_VER}" -m venv /opt/darts
+    /opt/darts/bin/pip install --no-cache-dir --upgrade pip
+    echo "Installing $(basename "$WHEEL") with extras [${EXTRAS:-none}]"
+    if [ -n "$EXTRAS" ]; then
+        /opt/darts/bin/pip install --no-cache-dir "${WHEEL}[${EXTRAS}]"
+    else
+        /opt/darts/bin/pip install --no-cache-dir "${WHEEL}"
+    fi
+    rm -rf /opt/wheelhouse
+
+    # -- verify the CUDA closure before anyone ships this ---------------------
+    # ldd against the installed extension modules. Anything unresolved here is a
+    # library we forgot to install, and it would otherwise surface as an
+    # ImportError on the user's machine.
+    echo "Verifying shared-library closure of the installed open-DARTS binaries"
+    MISSING=0
+    for so in $(find /opt/darts -name '*.so' -o -name '*.so.*' | grep -E '/site-packages/darts/'); do
+        # libcuda.so.1 is the driver; it is injected by `apptainer --nv` at run
+        # time and is legitimately absent from the image.
+        if ldd "$so" 2>/dev/null | grep 'not found' | grep -qv 'libcuda\.so\.1'; then
+            echo "  UNRESOLVED in $so:" >&2
+            ldd "$so" 2>/dev/null | grep 'not found' | grep -v 'libcuda\.so\.1' >&2
+            MISSING=1
+        fi
+    done
+    [ "$MISSING" -eq 0 ] || { echo "FATAL: unresolved runtime dependencies (see above)" >&2; exit 1; }
+
+    # -- cuDSS: in the wheel when asked for, and never without NVIDIA's licence, whose terms
+    # allow redistributing it only with their notice
+    # find_spec locates the installed package without importing it
+    SOLVERS="$(/opt/darts/bin/python -I -c "import importlib.util; print(importlib.util.find_spec('darts').submodule_search_locations[0])")/linear_solvers"
+    if [ "{{ CUDSS }}" = "1" ] && [ ! -e "$SOLVERS/libcudss.so.0" ]; then
+        echo "FATAL: the wheel has no cuDSS (libcudss.so.0); build it with cuDSS, or pass --no-cudss" >&2
+        exit 1
+    fi
+    if [ -e "$SOLVERS/libcudss.so.0" ] && [ ! -e "$SOLVERS/LICENSE.cuDSS.txt" ]; then
+        echo "FATAL: libcudss.so.0 without NVIDIA's licence (LICENSE.cuDSS.txt)" >&2
+        exit 1
+    fi
+
+    # -- final trim ------------------------------------------------------------
+    # The SIF is read-only, so a module without a .pyc recompiles on *every*
+    # process start. Pre-compiling is both a speed and a correctness fix here.
+    # phreeqpy.input is Python 2 code that nothing imports (open-DARTS uses
+    # phreeqpy.iphreeqc); skipping it keeps its SyntaxErrors out of the log.
+    /opt/darts/bin/python -m compileall -q -j 0 -x '/phreeqpy/input/' /opt/darts/lib || true
+    # Deliberately NOT stripping site-packages. RHEL 8's binutils corrupts the
+    # program-header alignment of the large-page-aligned shared libraries that
+    # numpy and scipy vendor, and the image then fails at `import numpy` with
+    #   libscipy_openblas64_-....so: ELF load command address/offset not
+    #   properly aligned
+    # open-DARTS' own binaries arrive stripped from the build anyway (measured:
+    # `strip --strip-unneeded` on engines.so changes nothing), so this pass cost
+    # a broken image for no gain.
+    dnf -y clean all
+    # NB: never `rm -rf /tmp/*` here. Apptainer's default `mount tmp = yes`
+    # bind-mounts the HOST /tmp into %post, so that glob deletes the build
+    # machine's temp files -- on a shared runner, everyone's.
+    rm -rf /var/cache/dnf /var/cache/yum /root/.cache \
+           /usr/share/doc /usr/share/man /usr/share/info
+
+    # -- provenance ------------------------------------------------------------
+    # Recorded into labels.json so `apptainer inspect` answers "what GPUs does
+    # this image support, and which driver do I need" without running it.
+    case "$CUDA_MAJOR" in
+        12) MIN_DRIVER=525 ;;
+        13) MIN_DRIVER=580 ;;
+        *)  MIN_DRIVER=0 ;;
+    esac
+    printf '%s\n' "$MIN_DRIVER" > /opt/darts/.min_driver
+    printf '%s\n' "$CUDA_MAJOR" > /opt/darts/.cuda_major
+
+%environment
+    export PATH=/opt/darts/bin:$PATH
+    # The caller's TMPDIR comes along with the environment, and on the CI
+    # runners it names a host path (/data/gitlab-runner/tmp) that is not bound
+    # inside the container. Anything writing there then fails in a way that
+    # looks nothing like the cause -- nvcc, for one, dies with
+    #     nvcc fatal : Could not open output file '/data/gitlab-runner/tmp/tmpxft_...'
+    # Only replace it when it is genuinely unusable: where the caller's TMPDIR
+    # does work it is usually a large scratch disk, and silently redirecting
+    # model output and numba's cache to a small /tmp would be the worse bug.
+    # NUMBA_CACHE_DIR and MPLCONFIGDIR below derive from the result.
+    if [ -n "${TMPDIR:-}" ] && { [ ! -d "$TMPDIR" ] || [ ! -w "$TMPDIR" ]; }; then
+        export TMPDIR=/tmp
+    fi
+    # $HOME is bind-mounted by default, so without this the host's
+    # ~/.local/lib/pythonX.Y/site-packages silently shadows the image's packages
+    # -- the single most common way a "portable" Apptainer image stops being one.
+    export PYTHONNOUSERSITE=1
+    # An inherited PYTHONHOME names an interpreter that does not exist in here
+    # and breaks the venv outright. It cannot be cleared from this section --
+    # Apptainer applies the variables this script *exports* over the inherited
+    # environment and ignores `unset` -- so %runscript clears it instead, and
+    # `apptainer exec --cleanenv` is the remedy for the exec path.
+    # PYTHONPATH is deliberately left alone: adding your own modules with it is
+    # legitimate, though aiming it at another interpreter's site-packages will
+    # shadow the image's numpy/scipy just as thoroughly.
+    # Headless by default; a model that calls plt.savefig() must not need an X server.
+    export MPLBACKEND=Agg
+    # The image is read-only, so numba and matplotlib need somewhere to write.
+    # Both create these directories themselves. Honour a caller-set TMPDIR.
+    export NUMBA_CACHE_DIR="${NUMBA_CACHE_DIR:-${TMPDIR:-/tmp}/numba-cache}"
+    export MPLCONFIGDIR="${MPLCONFIGDIR:-${TMPDIR:-/tmp}/mpl-cache}"
+    # Materialise only the cubin for the GPU actually present rather than every
+    # one in the fatbinary -- with a multi-architecture build that saves both
+    # start-up time and a few hundred MB of device memory.
+    export CUDA_MODULE_LOADING=LAZY
+
+    # CUDA forward compatibility. When the host driver predates what this
+    # image's CUDA runtime needs, prefer NVIDIA's bundled compat libcuda --
+    # what nvidia-container-toolkit does outside Apptainer. Datacenter GPUs
+    # only. DARTS_CUDA_COMPAT=0 disables, =1 forces.
+    #
+    # This lives here rather than in %runscript so that `apptainer exec` gets
+    # it too; %runscript only covers `apptainer run`.
+    if [ "${DARTS_CUDA_COMPAT:-auto}" != "0" ] && [ -d /usr/local/cuda/compat ]; then
+        _darts_need="$(cat /opt/darts/.min_driver 2>/dev/null || echo 0)"
+        # /proc is the host's, so this is the driver actually loaded. `--nv`
+        # injects libcuda.so.1 unversioned, so the library name cannot be parsed.
+        _darts_have="$(sed -n 's/^NVRM version:.*Module *\([0-9]\+\)\..*/\1/p' \
+                       /proc/driver/nvidia/version 2>/dev/null)"
+        if [ "${DARTS_CUDA_COMPAT:-auto}" = "1" ] ||
+           { [ -n "$_darts_have" ] && [ "$_darts_need" -gt 0 ] 2>/dev/null &&
+             [ "$_darts_have" -lt "$_darts_need" ] 2>/dev/null; }; then
+            echo "open-DARTS: host driver ${_darts_have:-?} is older than r${_darts_need}; using bundled CUDA compat libraries" >&2
+            export LD_LIBRARY_PATH="/usr/local/cuda/compat${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+        fi
+        unset _darts_need _darts_have
+    fi
+
+%runscript
+    #!/bin/bash
+    set -u
+
+    # %environment cannot clear these (Apptainer honours exports there, not
+    # unsets), but this is a real script, so it can.
+    unset PYTHONHOME
+
+    # Forgetting --nv is the single most common way to get an unhelpful error
+    # out of a GPU container, so say what is wrong rather than letting CUDA
+    # fail deep inside an import.
+    if [ ! -e /.singularity.d/libs/libcuda.so.1 ] && [ ! -e /usr/lib64/libcuda.so.1 ]; then
+        cat >&2 <<'EOF'
+open-DARTS: no NVIDIA driver visible inside the container.
+
+Pass --nv so Apptainer injects the host driver:
+
+    apptainer run --nv  <image>.sif model.py
+    apptainer exec --nv <image>.sif python -c "import darts; print('ok')"
+
+Set DARTS_ALLOW_NO_GPU=1 to continue anyway (CPU engines only).
+EOF
+        [ -n "${DARTS_ALLOW_NO_GPU:-}" ] || exit 1
+    fi
+
+    # `run image model.py`      -> python model.py
+    # `run image -m pytest ...` -> python -m pytest ...
+    # `run image darts --help`  -> that command, in the image's environment
+    # `run image`               -> an interactive interpreter
+    [ "$#" -eq 0 ] && exec python
+    case "$1" in
+        *.py | -*) exec python "$@" ;;
+        *)         exec "$@" ;;
+    esac
+
+%test
+    #!/bin/bash
+    # Runs at build time when `apptainer build --nv` was used, and on demand with
+    # `apptainer test --nv <image>.sif`.
+    #
+    # This deliberately executes a real CUDA kernel rather than just importing
+    # darts. A multi-architecture image is only portable if the fatbinary
+    # actually carries code the host GPU can run (or PTX the driver can JIT);
+    # an import-only check passes happily on a GPU that has neither.
+    set -e
+    echo "== open-DARTS runtime image self-test =="
+    # -I (isolated): `python -` puts the *caller's* working directory first on
+    # sys.path, and Apptainer bind-mounts that directory. Every open-DARTS
+    # checkout has a `darts/` package at its root, so running this test from a
+    # clone -- which is exactly what build_runtime_image.sh and the CI job do --
+    # imports the repository's `darts` instead of the image's and fails with
+    #   ModuleNotFoundError: No module named 'darts.interpolators'
+    # (or a GLIBCXX error, when the checkout also holds locally built .so files).
+    # -I also drops PYTHONPATH and the user site-packages, so the test can only
+    # pass on what the image itself installed -- the whole point of it.
+    # %runscript deliberately does NOT do this: a model script legitimately
+    # imports its own modules from the working directory.
+    python -I - <<'PYEOF'
+import sys
+from importlib.metadata import version
+
+import numpy as np
+import darts.interpolators as itors
+from darts.engines import index_vector, timer_node, value_vector
+from darts.interpolators import operator_set_evaluator_iface
+
+print(f"python      {sys.version.split()[0]}")
+print(f"open-darts  {version('open-darts')}")
+
+N_DIMS, N_OPS = 3, 4
+cls = getattr(itors, f"multilinear_gpu_interpolator_d_{N_DIMS}_{N_OPS}", None)
+if cls is None:
+    raise SystemExit("FAIL: no GPU interpolator template -- this is not a GPU build")
+
+class Linear(operator_set_evaluator_iface):
+    def __init__(self):
+        super().__init__()
+        self.A = np.random.default_rng(42).uniform(-1.0, 1.0, size=(N_OPS, N_DIMS + 1))
+    def evaluate(self, state, values):
+        np.asarray(values)[:] = self.A[:, :N_DIMS] @ np.asarray(state) + self.A[:, N_DIMS]
+        return 0
+    def truth(self, flat):
+        s = np.asarray(flat).reshape(-1, N_DIMS)
+        return (s @ self.A[:, :N_DIMS].T + self.A[:, N_DIMS]).reshape(-1)
+
+ev = Linear()
+itor = cls(ev, value_vector([0.0] * N_DIMS), value_vector([0.1] * N_DIMS))
+itor.init()
+# root_timer must be held in a variable: the GPU evaluate path dereferences the
+# timer without a null check and does not own it, so passing a temporary here
+# frees it immediately and segfaults in evaluate_with_derivatives below.
+root_timer = timer_node()
+itor.init_timer_node(root_timer)
+
+n = 4096
+s = np.random.default_rng(11).uniform(0.0, 1.0, size=(n, N_DIMS))
+vals = value_vector(np.zeros(n * N_OPS))
+itor.evaluate_with_derivatives(
+    value_vector(s.flatten().astype(np.float64)),
+    index_vector(np.arange(n, dtype=np.int32)),
+    vals,
+    value_vector(np.zeros(n * N_OPS * N_DIMS)),
+)
+err = float(np.max(np.abs(np.asarray(vals) - ev.truth(s.flatten()))))
+print(f"GPU kernel  {n} points, max abs error {err:.2e}")
+if not err < 1e-9:
+    raise SystemExit(f"FAIL: GPU interpolation is wrong (max abs error {err:.3e})")
+print("GPU kernel  OK")
+PYEOF
+    echo "== self-test OK =="
+
+%labels
+    PROJECT        open-darts
+    ROLE           runtime
+    DARTS_VERSION  {{ DARTS_VERSION }}
+    VCS_REF        {{ VCS_REF }}
+    CUDA_VERSION   {{ CUDA_VERSION }}
+    CUDA_ARCH      {{ CUDA_ARCH }}
+    CUDA_COMPAT    {{ KEEP_CUDA_COMPAT }}
+    CUDSS          {{ CUDSS }}
+    CPU_ARCH       {{ CPU_ARCH }}
+    PY_VER         {{ PY_VER }}
+
+%help
+    open-DARTS GPU runtime image.
+
+    Run a model:
+        apptainer run --nv open-darts-gpu.sif model.py
+
+    Arbitrary command in the environment:
+        apptainer exec --nv open-darts-gpu.sif python -c "import darts"
+        apptainer exec --nv open-darts-gpu.sif darts --help
+
+    Check the image and the host agree:
+        apptainer test --nv open-darts-gpu.sif
+        apptainer inspect open-darts-gpu.sif      # CUDA/GPU/CPU targets
+
+    Pick a GPU:
+        APPTAINERENV_CUDA_VISIBLE_DEVICES=1 apptainer run --nv open-darts-gpu.sif model.py
+
+    Data outside $HOME and $PWD must be bind-mounted:
+        apptainer run --nv -B /scratch/cases:/cases open-darts-gpu.sif /cases/run.py
+
+    See docs/containers/apptainer.md in the open-DARTS repository for the GPU/driver
+    support matrix.

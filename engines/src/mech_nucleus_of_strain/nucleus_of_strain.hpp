@@ -97,7 +97,7 @@ inline double pow_1(int i, int j, int k)
 
 
 std::array<double, 6>
-compute_point(std::array<double, 3>& coordinates, std::vector<double>& prisms, std::vector<double>& pressure, 
+compute_point(std::array<double, 3>& coordinates, std::vector<double>& prisms, std::vector<double>& pressure,
     std::vector<double>& temperature, double poisson);
 
 std::array<double, 9>

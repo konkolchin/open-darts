@@ -29,6 +29,8 @@ Help_Info()
   echo "   -p               : Enable building & installing IPhreeqc and Reaktoro (OFF by default, requires active Conda env)"
   echo "   -v               : Enable build with valgrind support (OFF by default)"
   echo "   CUDA_ARCH env var: Specify CUDA architecture(s), e.g. \"70\" or \"70;80\""
+  echo "   CPU_ARCH env var : -march value for the GPU build host code: native (default), an explicit"
+  echo "                      ISA baseline such as x86-64-v3 for redistributable builds, or off."
   echo "   HYPRE_OPENMP env : Build HYPRE with OpenMP (parallel BoomerAMG/ILU in CPR/MGR). Default: true; set HYPRE_OPENMP=0 to build HYPRE sequentially. Slightly changes solver numerics. Requires -c to (re)build HYPRE."
 }
 
@@ -97,6 +99,7 @@ gpp_version=g++   # Version of g++
 special_gpp=false # Whether a special compiler version (g++) is specified.
 valgrind=false    # Whether support valgrind profiling or not
 CUDA_ARCH="${CUDA_ARCH:-}"
+CPU_ARCH="${CPU_ARCH:-}"   # -march baseline for the GPU build; empty leaves the CMake default (native)
 HYPRE_OPENMP="${HYPRE_OPENMP:-true}" # Build HYPRE with its own OpenMP threading (on by default; HYPRE_OPENMP=0 opts out)
 
 while getopts ":chtwmrab:d:j:g:Gpv" option; do
@@ -423,6 +426,10 @@ fi
 
 if [[ ! -z "$CUDA_ARCH" ]]; then
     cmake_options+=" -D CUDA_ARCH=${CUDA_ARCH}"
+fi
+
+if [[ ! -z "$CPU_ARCH" ]]; then
+    cmake_options+=" -D CPU_ARCH=${CPU_ARCH}"
 fi
 
 if [[ -n "${OD_CMAKE_ARGS:-}" ]]; then

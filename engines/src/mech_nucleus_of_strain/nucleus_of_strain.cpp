@@ -72,8 +72,8 @@ std::string get_platform()
 
 std::map<std::string, std::vector<double>>
 compute_geomech(
-    std::vector<double>& coordinates, 
-    std::vector<double>& prisms, 
+    std::vector<double>& coordinates,
+    std::vector<double>& prisms,
     std::vector<double>& pressure,
     double poisson,
     double young,
@@ -108,7 +108,7 @@ compute_geomech(
     */
     //dtype = "float64",
     //disable_checks = True
- 
+
 /*
 // Sanity checks
 if (!disable_checks) {
@@ -172,7 +172,7 @@ return result;
 
 
 std::array<double, 6>
-compute_point(std::array<double, 3>& coordinates, std::vector<double>& prisms, std::vector<double>& pressure, 
+compute_point(std::array<double, 3>& coordinates, std::vector<double>& prisms, std::vector<double>& pressure,
     std::vector<double>& temperature, double poisson_coeff)
 {
     /*

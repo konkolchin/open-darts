@@ -30,6 +30,11 @@ struct engine_super_gpu_exposer
       .def("get_X_d", [](const engine_super_gpu<NC, NP, THERMAL>& self) -> py::capsule {
             return py::capsule(self.X_d, "double_ptr");
           }) \
+      // previous-timestep state: push host edits of engine.Xn with copy_data_to_device(engine.Xn, engine.get_Xn_d())
+      .def("get_Xn_d", [](const engine_super_gpu<NC, NP, THERMAL>& self) -> py::object {
+            if (!self.Xn_d) return py::none();
+            return py::capsule(&(self.Xn_d), "double_ptr_ptr");
+          }) \
       .def("get_RHS_d", [](const engine_super_gpu<NC, NP, THERMAL>& self) -> py::capsule {
             return py::capsule(self.RHS_d, "double_ptr");
           }) \
@@ -50,6 +55,17 @@ struct engine_super_gpu_exposer
           }) \
       .def("get_dispersivity_d", [](const engine_super_gpu<NC, NP, THERMAL>& self) -> py::capsule {
             return py::capsule(&(self.dispersivity_d), "double_ptr_ptr");
+          }) \
+      // Device copies of mesh.tran / mesh.tranD, made by init() and read at every assembly: after editing mesh.tran on
+      // the host (e.g. shutting perforations), push it with copy_data_to_device(mesh.tran, engine.get_mesh_tran_d()).
+      // None before init(), which copies the host arrays itself.
+      .def("get_mesh_tran_d", [](const engine_super_gpu<NC, NP, THERMAL>& self) -> py::object {
+            if (!self.mesh_tran_d) return py::none();
+            return py::capsule(&(self.mesh_tran_d), "double_ptr_ptr");
+          }) \
+      .def("get_mesh_tranD_d", [](const engine_super_gpu<NC, NP, THERMAL>& self) -> py::object {
+            if (!self.mesh_tranD_d) return py::none();
+            return py::capsule(&(self.mesh_tranD_d), "double_ptr_ptr");
           });
   };
 };

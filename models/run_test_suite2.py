@@ -425,7 +425,7 @@ if __name__ == '__main__':
     # print build info
     engines_pbi()
 
-    # environment variables that select what the suite runs and how, as set by the caller (before the defaults below); 
+    # environment variables that select what the suite runs and how, as set by the caller (before the defaults below);
     for var in ['UPLOAD_PKL', 'TEST_ALL_MODELS', 'MR_NON_DRAFT', 'OMP_NUM_THREADS', 'TEST_GPU',
                 'GPU_DEVICE', 'ODLS', 'TEST_CUSTOM_BRANCH']:
         print('env %s=%s' % (var, os.getenv(var, '<unset>')))

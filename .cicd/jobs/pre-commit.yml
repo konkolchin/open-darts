@@ -3,7 +3,10 @@ pre-commit:
     tags:
         - linux_tahiti_gpu
     variables:
-        PRE_COMMIT_HOME: "/data/gitlab-runner/.cache/pre-commit"
+        # Job-private pre-commit store, fresh in every job: concurrent jobs on the runner
+        # cannot share one, as one job's cleanup removes the hook environments another
+        # one is still installing.
+        PRE_COMMIT_HOME: "${CI_PROJECT_DIR}/.pre-commit-cache"
         CONDA_ENV: "precommit-${CI_JOB_ID}"
         # Job-private conda package cache to avoid races on the shared
         # /data/gitlab-runner/miniconda3/pkgs/ cache (concurrent jobs on the
@@ -19,7 +22,6 @@ pre-commit:
         - conda activate "${CONDA_ENV}"
         - python -m pip install --upgrade pip
         - pip install pre-commit
-        - pre-commit clean || true
     script:
         - echo 'Running pre-commit checks (Python, YAML, TOML)...'
         - pre-commit --version

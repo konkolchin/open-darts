@@ -90,69 +90,98 @@ pages:
     dependencies:
         - build-linux
 
-deploy-apptainer-image:
+# ---------------------------------------------------------------------------
+# Publish the portable GPU runtime image built by apptainer-runtime-gpu-image
+# (.cicd/jobs/build-images.yml) to the GitLab container registry over ORAS.
+#
+# This is the only Apptainer image the project publishes. The builder image is
+# a CI tool: it stays on the tahiti runner's disk (apptainer-builder-gpu-image
+# keeps the newest few and an open-darts-latest.sif symlink) and is never pushed.
+#
+#   development pipeline         ->  darts-gpu:latest, darts-gpu:<sha12>
+#   release tag vX.Y.Z           ->  darts-gpu:X.Y.Z,  darts-gpu:<sha12>
+#   RUN_RUNTIME_IMAGE_DEPLOY=1   ->  darts-gpu:<sha12>   (other protected refs)
+# ---------------------------------------------------------------------------
+deploy-apptainer-runtime-gpu-image:
     stage: deploy
     tags:
         - linux_tahiti_gpu
-    timeout: 4h
     variables:
-        IMAGE_PREFIX: "open-darts"
+        # Pushing a 1.5 GB SIF stages through the temp dir; /tmp on the runner is
+        # not sized for that. (It no longer inherits this from the build lane's
+        # template, so it is stated here.)
+        APPTAINER_TMPDIR: "/data/gitlab-runner/apptainer-tmp"
+        APPTAINER_CACHEDIR: "/data/gitlab-runner/apptainer-cache"
     needs:
-        - job: apptainer-image-builder
+        - job: apptainer-runtime-gpu-image
           artifacts: true
-          optional: true
-    dependencies: []
+        - job: test-apptainer-runtime-gpu
     rules:
-        - if: $RUN_APPTAINER_DEPLOY == "1"
+        - if: $MCP_TRIGGER_TAHITI_GPU == "1"
+          when: never
+        # Every development pipeline publishes the image it built and tested.
+        # push/web/schedule only -- trigger and API pipelines run with the
+        # trigger owner's permissions, which may not include registry write
+        # (the reasoning docker-builder-image applies to its own pushes).
+        # apptainer-runtime-gpu-image uses the same condition to switch to
+        # portable mode, so an image is never built portable and then dropped.
+        - if: $CI_COMMIT_BRANCH == "development" && $CI_PIPELINE_SOURCE =~ /^(push|web|schedule)$/
+        - if: $CI_COMMIT_TAG =~ /^v?[0-9]+\.[0-9]+\.[0-9]+/
+        # Protected only: this job hard-needs test-apptainer-runtime-gpu, which
+        # exists only on protected refs, tags and MRs -- and publishing from an
+        # arbitrary branch is not something to make easy anyway.
+        - if: $RUN_RUNTIME_IMAGE_DEPLOY == "1" && $CI_COMMIT_REF_PROTECTED == "true"
         - when: never
     script:
         - set -euo pipefail
-        - IMG_DIR="/data/open-darts-apptainer-images"
-        - REPO="$CI_REGISTRY_IMAGE"
         - |
-          IMG=""
-          # Prefer deterministic image path from apptainer-image-builder dotenv artifact.
-          if [ -n "${APPTAINER_IMAGE:-}" ] && [ -r "${APPTAINER_IMAGE}" ]; then
-            IMG="${APPTAINER_IMAGE}"
-            echo "Using APPTAINER_IMAGE from upstream dotenv: $IMG"
-          elif [ -n "${APPTAINER_BUILD_KEY:-}" ] && [ -r "$IMG_DIR/${IMAGE_PREFIX}-${APPTAINER_BUILD_KEY}.sif" ]; then
-            IMG="$IMG_DIR/${IMAGE_PREFIX}-${APPTAINER_BUILD_KEY}.sif"
-            echo "Using APPTAINER_BUILD_KEY from upstream dotenv: $APPTAINER_BUILD_KEY"
-          else
-            echo "Dotenv artifact not available or stale; using shared image fallback"
-            LINK="$IMG_DIR/${IMAGE_PREFIX}-latest.sif"
-            if [ -L "$LINK" ] || [ -f "$LINK" ]; then
-              CANDIDATE="$(readlink -f "$LINK" || true)"
-              if [ -n "$CANDIDATE" ] && [ -r "$CANDIDATE" ]; then
-                IMG="$CANDIDATE"
-              fi
-            fi
-            if [ -z "$IMG" ]; then
-              IMG="$(find "$IMG_DIR" -maxdepth 1 -type f -name "${IMAGE_PREFIX}-*.sif" -printf '%T@ %p\n' | sort -nr | head -n1 | awk '{ $1=""; sub(/^ /,""); print }')"
-            fi
-          fi
-          if [ -z "$IMG" ] || [ ! -r "$IMG" ]; then
-            echo "Apptainer image not found in $IMG_DIR" >&2
+          if [ -z "${RUNTIME_IMAGE:-}" ] || [ ! -r "$RUNTIME_IMAGE" ]; then
+            echo "runtime image unavailable: ${RUNTIME_IMAGE:-<unset>}" >&2
             exit 2
           fi
-          apptainer inspect "$IMG" >/dev/null 2>&1 || { echo "Apptainer image is corrupted: $IMG" >&2; exit 2; }
-          BASENAME="$(basename "$IMG")"
-          BUILD_KEY="$(echo "$BASENAME" | sed -n "s/^${IMAGE_PREFIX}-\([a-f0-9]\{64\}\)\.sif$/\1/p")"
-          if [ -n "$BUILD_KEY" ]; then
-            echo "BUILD_KEY=$BUILD_KEY"
-          fi
-          echo "REPO=$REPO"
-          echo "Selected image: $IMG"
-          export IMG
-        # Authenticate and push via ORAS (GitLab Container Registry)
-        - export APPTAINER_DOCKER_USERNAME="$CI_REGISTRY_USER"
-        - export APPTAINER_DOCKER_PASSWORD="$CI_REGISTRY_PASSWORD"
-        - echo "Logging into registry $CI_REGISTRY with Apptainer"
-        - apptainer registry login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" "oras://$CI_REGISTRY" || echo "Apptainer registry login warning; continuing"
-        # Try push; if tag exists, do not fail the job
+          apptainer inspect "$RUNTIME_IMAGE" >/dev/null || { echo "corrupted image" >&2; exit 2; }
+        # Never publish a validation image: it is compiled for whichever GPU the
+        # runner happened to have and would strand everyone else. The check is
+        # on the exact marker validation mode writes, so a deliberate
+        # single-architecture release (--cuda-arch 90, say) is still allowed --
+        # it only gets a warning.
         - |
-          if apptainer push "$IMG" "oras://$REPO/apptainer:latest"; then
-            echo "Pushed $REPO/apptainer:latest"
-          else
-            echo "Push failed"; exit 1;
+          ARCH_LABEL="$(apptainer inspect "$RUNTIME_IMAGE" 2>/dev/null | sed -n 's/^CUDA_ARCH: *//p')"
+          echo "image CUDA_ARCH label: ${ARCH_LABEL:-<none>}"
+          if [ "$ARCH_LABEL" = "ci-validation-native" ]; then
+            echo "FATAL: this is a CI validation image (single GPU architecture)." >&2
+            echo "       Rebuild with RUNTIME_IMAGE_MODE=portable before publishing." >&2
+            exit 1
           fi
+          case "$ARCH_LABEL" in
+            *\;*) : ;;
+            *) echo "WARNING: publishing an image with a single GPU target (${ARCH_LABEL:-<none>})" >&2 ;;
+          esac
+        - apptainer registry login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" "oras://$CI_REGISTRY"
+        - |
+          REPO="$CI_REGISTRY_IMAGE/darts-gpu"
+          # The immutable coordinate is always safe to push.
+          TAGS="${CI_COMMIT_SHA:0:12}"
+          if [ -n "${CI_COMMIT_TAG:-}" ]; then
+            TAGS="${CI_COMMIT_TAG#v} $TAGS"
+          elif [ "${CI_COMMIT_BRANCH:-}" = "development" ]; then
+            # `latest` is a moving pointer, so only ever move it forward. A
+            # portable build takes about an hour, so development pipelines
+            # finish out of order, and old pipelines get re-run -- either would
+            # otherwise point `latest` back at an older commit. Only claim it
+            # while this commit is still the tip of development.
+            TIP="$(git ls-remote origin refs/heads/development 2>/dev/null | cut -f1 || true)"
+            if [ "$TIP" = "$CI_COMMIT_SHA" ]; then
+              TAGS="latest $TAGS"
+            elif [ -z "$TIP" ]; then
+              echo "WARNING: could not read the tip of development; leaving 'latest' untouched" >&2
+            else
+              echo "development has moved on to ${TIP:0:12}; leaving 'latest' to that pipeline"
+            fi
+          fi
+          for t in $TAGS; do
+            echo "Pushing oras://$REPO:$t"
+            apptainer push "$RUNTIME_IMAGE" "oras://$REPO:$t"
+          done
+          echo
+          for t in $TAGS; do echo "Pull with:  apptainer pull oras://$REPO:$t"; done

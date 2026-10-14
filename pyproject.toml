@@ -64,7 +64,7 @@ exclude = ["discretizer", "engines", "models", "linear_solvers", "docs", "thirdp
 
 [tool.setuptools.package-data]
 darts = ['*.pyd', '*.so', '*.dll', 'CHANGELOG.md', 'build_info.txt', 'libstdc++.so.6']
-"darts.linear_solvers" = ['*.pyd', '*.so', '*.dll', 'libcudss.so*']
+"darts.linear_solvers" = ['*.pyd', '*.so', '*.dll', 'libcudss.so*', 'LICENSE.cuDSS.txt']
 "darts.physics.geomechanics.nucleus_of_strain" = ['*.pyd', '*.so']
 "darts.physics.properties" = ["databases/*"]
 
