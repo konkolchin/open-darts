@@ -19,13 +19,9 @@ from darts.physics.base.physics import PhysicsBase
 from darts.tools.hdf5_tools import load_hdf5_to_dict
 from darts.tools.vtk_io import write_lines_vtp, write_pvd
 
-# Dead state that energy rates are reported relative to (optional). Default energy rates don't use a dead state.
-DEAD_STATE_PRESSURE = 1.01325  # bar (1 atm)
-DEAD_STATE_TEMPERATURE = 273.15 + 15.0  # K (15 deg C)
-
 ENERGY_RATE_TYPES = (
     "energy_rate",
-    "energy_rate_relative_to_dead_state",
+    "energy_rate_relative_to_ref_state",
 )
 
 # ── Picklable accessors for output-property dicts ─────────────────────────────
@@ -2095,8 +2091,10 @@ class Output:
         component_molar_rate: bool = True,
         component_mass_rate: bool = True,
         energy_rate: bool = True,
-        energy_rate_relative_to_dead_state: bool = False,
+        energy_rate_relative_to_ref_state: bool = False,
         save_output_files: bool = False,
+        ref_pressure: float = 1.01325,
+        ref_temperature: float = 288.15,
     ):
         """
         Compute and store well time data including rates and bottom-hole pressure and temperature (BHT and BHP)
@@ -2119,12 +2117,17 @@ class Output:
         :param energy_rate: Compute energy rates for thermal scenarios,
             i.e., molar rate * molar enthalpy
         :type energy_rate: bool
-        :param energy_rate_relative_to_dead_state: Compute energy rates for thermal
-            scenarios relative to the dead state (1 atm, 15 deg C),
-            i.e., molar rate * molar enthalpy - molar rate * molar enthalpy at dead state.
-        :type energy_rate_relative_to_dead_state: bool
+        :param energy_rate_relative_to_ref_state: Compute energy rates for thermal
+            scenarios as molar rate times the enthalpy difference from the reference state.
+        :type energy_rate_relative_to_ref_state: bool
         :param save_output_files: Flag to save time_data as a .pkl and .xlsx file in the output folder
         :type save_output_files: bool
+        :param ref_pressure: Reference pressure [bar] used when
+            energy_rate_relative_to_ref_state=True, default is 1.01325 (1 atm).
+        :type ref_pressure: float
+        :param ref_temperature: Reference temperature [K] used when
+            energy_rate_relative_to_ref_state=True, default is 288.15 (15 deg C).
+        :type ref_temperature: float
         """
         # Start timer for storing well time data
         self.timer.start()
@@ -2154,8 +2157,8 @@ class Output:
         rate_types += ["component_mass_rate"] if component_mass_rate else []
         rate_types += ["energy_rate"] if energy_rate and self.thermal else []
         rate_types += (
-            ["energy_rate_relative_to_dead_state"]
-            if energy_rate_relative_to_dead_state and self.thermal
+            ["energy_rate_relative_to_ref_state"]
+            if energy_rate_relative_to_ref_state and self.thermal
             else []
         )
 
@@ -2167,6 +2170,8 @@ class Output:
                 geometric_WI,
                 self.thermal,
                 rate_type,
+                ref_pressure=ref_pressure,
+                ref_temperature=ref_temperature,
             )
             # Store perforation rates
             self.store_perf_rates(time_data_dict, rates_perfs, rate_type)
@@ -2180,6 +2185,8 @@ class Output:
                 well_head_conn_trans,
                 self.thermal,
                 rate_type,
+                ref_pressure=ref_pressure,
+                ref_temperature=ref_temperature,
             )
             # Store wellhead rates
             self.store_wellhead_rates(time_data_dict, rates_wellhead, rate_type)
@@ -2465,22 +2472,25 @@ class Output:
             "Reservoir operators must expose GRAV_OP/PC_OP for rate calculation."
         )
 
-    def _calc_dead_enthalpies(
+    def _calc_ref_enthalpies(
         self,
         phase_flux_ops: np.ndarray,
         molar_ops: np.ndarray,
-        p_dead: float,
-        T_dead: float,
+        ref_pressure: float,
+        ref_temperature: float,
     ) -> np.ndarray:
         """
-        Calculate the enthalpy of the phase at dead pressure and temperature.
+        Calculate the enthalpy of the phase at reference pressure and temperature.
 
         :param phase_flux_ops: Upwinded component flux operators, shaped
             (batch, phases, fluid components), proportional to phase mole fractions.
         :param molar_ops: Upwind phase molar-flow coefficients.
-        :param p_dead: Dead pressure [bar].
-        :param T_dead: Dead temperature [K].
-        :return: Dead enthalpies [kJ/kmol].
+        :param ref_pressure: Reference pressure [bar].
+        :type ref_pressure: float
+        :param ref_temperature: Reference temperature [K].
+        :type ref_temperature: float
+        :return: Reference enthalpies [kJ/kmol].
+        :rtype: np.ndarray
         """
         pc = self.physics.property_containers[0]
         enthalpies = np.zeros_like(molar_ops)
@@ -2495,11 +2505,11 @@ class Output:
             if key not in reference_cache:
                 # A PT state of the phase's composition, with no solids.
                 reference_state = np.zeros(pc.nc + 1)
-                reference_state[0] = p_dead
+                reference_state[0] = ref_pressure
                 full_composition = np.zeros(pc.nc)
                 full_composition[: pc.nc_fl] = composition
                 reference_state[1 : pc.nc] = full_composition[:-1]
-                reference_state[pc.nc] = T_dead
+                reference_state[pc.nc] = ref_temperature
                 reference_cache[key] = pc.compute_total_enthalpy(reference_state)
             enthalpies[row, phase] = reference_cache[key]
         return enthalpies
@@ -2511,6 +2521,8 @@ class Output:
         trans: np.ndarray,
         thermal: bool,
         rate_type: str,
+        ref_pressure: float = 1.01325,
+        ref_temperature: float = 288.15,
     ):
         """
         Calculate different types of rates at perforations or wellhead connections of wells.
@@ -2529,6 +2541,12 @@ class Output:
         :type thermal: bool
         :param rate_type: Type of well rate to calculate
         :type rate_type: str
+        :param ref_pressure: Reference pressure [bar] used when rate_type is
+            "energy_rate_relative_to_ref_state", default is 1.01325 (1 atm).
+        :type ref_pressure: float
+        :param ref_temperature: Reference temperature [K] used when rate_type is
+            "energy_rate_relative_to_ref_state", default is 288.15 (15 deg C).
+        :type ref_temperature: float
         """
         # Evaluate position of block_m, block_p in stored data for every connection
         block_m = h5_well_data["static"]["block_m"]
@@ -2739,7 +2757,7 @@ class Output:
                 well_ops_p[:, op_start : op_start + pc.nph],
             )
 
-            if rate_type == "energy_rate_relative_to_dead_state":
+            if rate_type == "energy_rate_relative_to_ref_state":
                 molar_rate_start = int(well_control_iface.MOLAR_RATE) * pc.nph
                 molar_ops = np.where(
                     upwind_m,
@@ -2747,7 +2765,7 @@ class Output:
                     well_ops_p[:, molar_rate_start : molar_rate_start + pc.nph],
                 )
 
-                # Get flux operators to get phase composition from them later in _calc_dead_enthalpies
+                # Get flux operators to get phase composition from them later in _calc_ref_enthalpies
                 flux_start = reservoir_operator.FLUX_OP
                 flux_ops_m = reservoir_ops_m[
                     :, flux_start : flux_start + ne * pc.nph
@@ -2756,13 +2774,13 @@ class Output:
                     :, flux_start : flux_start + ne * pc.nph
                 ].reshape(batch_size, pc.nph, ne)
                 phase_flux_ops = np.where(upwind_m[:, :, None], flux_ops_m, flux_ops_p)
-                dead_enthalpies = self._calc_dead_enthalpies(
+                ref_enthalpies = self._calc_ref_enthalpies(
                     phase_flux_ops[:, :, : pc.nc_fl],
                     molar_ops,
-                    p_dead=DEAD_STATE_PRESSURE,
-                    T_dead=DEAD_STATE_TEMPERATURE,
+                    ref_pressure=ref_pressure,
+                    ref_temperature=ref_temperature,
                 )
-                ops = ops - molar_ops * dead_enthalpies
+                ops = ops - molar_ops * ref_enthalpies
 
         # Reshape arrays
         if rate_type in [
@@ -2793,7 +2811,7 @@ class Output:
         component_molar_rate: bool = True,
         component_mass_rate: bool = True,
         energy_rate: bool = True,
-        energy_rate_relative_to_dead_state: bool = False,
+        energy_rate_relative_to_ref_state: bool = False,
     ):
         """
         Plot well time data.
@@ -2814,9 +2832,9 @@ class Output:
         :type component_mass_rate: bool
         :param energy_rate: Plot energy rates for thermal scenarios, default is True
         :type energy_rate: bool
-        :param energy_rate_relative_to_dead_state: Plot energy rates relative to the
-            dead state for thermal scenarios, default is False
-        :type energy_rate_relative_to_dead_state: bool
+        :param energy_rate_relative_to_ref_state: Plot energy rates relative to the
+            reference state for thermal scenarios, default is False
+        :type energy_rate_relative_to_ref_state: bool
         """
         main_dir = os.path.join(self.output_folder, "figures/well_time_plots")
 
@@ -2839,8 +2857,8 @@ class Output:
         rate_types += ["component_mass_rate"] if component_mass_rate else []
         rate_types += ["energy_rate"] if energy_rate and self.thermal else []
         rate_types += (
-            ["energy_rate_relative_to_dead_state"]
-            if energy_rate_relative_to_dead_state and self.thermal
+            ["energy_rate_relative_to_ref_state"]
+            if energy_rate_relative_to_ref_state and self.thermal
             else []
         )
 

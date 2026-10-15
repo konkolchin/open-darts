@@ -279,7 +279,7 @@ def plot_results(model, time_data_dict, out_dir):
     # at least one production well. Energy rate is stored in kJ/day;
     # integration over days and 1e-12 convert it to PJ.
     if model.thermal and production_wells:
-        heat_suffix = '_energy_rate_relative_to_dead_state_wat_at_wh'
+        heat_suffix = '_energy_rate_relative_to_ref_state_wat_at_wh'
         heat_keys = [
             f'well_{name}{heat_suffix}' for name in production_wells
             if f'well_{name}{heat_suffix}' in time_data
@@ -695,7 +695,7 @@ def run(model_folder, decouple_geomech=None, generate_mesh=None, report_step=Non
     #m.print_stat()
     if save_well_time_data:
         time_data_dict = m.output.store_well_time_data(
-            save_output_files=True, energy_rate_relative_to_dead_state=True
+            save_output_files=True, energy_rate_relative_to_ref_state=True
         )
         plot_results(
             model=m,
