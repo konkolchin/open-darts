@@ -17,6 +17,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 
 #include <cuda_runtime.h>
 #include <cublas_v2.h>
@@ -147,6 +148,12 @@ namespace opendarts
         this->timer_setup->node["GMRES"].stop();
       return res;
     }
+
+    // DARTS_GMRES_TRACE=1 prints the relative residual at every GMRES
+    // iteration. Without it there is no way to tell a solver that stagnates on
+    // a near-singular preconditioned operator (flat history) from one that is
+    // merely slow (steady decrease) -- the engine reports only the final count.
+    static const bool gmres_trace = std::getenv("DARTS_GMRES_TRACE") != nullptr;
 
     template <uint8_t N_BLOCK_SIZE>
     int linsolv_gmres_gpu<N_BLOCK_SIZE>::solve(opendarts::config::mat_float *B, opendarts::config::mat_float *X)
@@ -285,6 +292,9 @@ namespace opendarts
           ++i;
           ++total_iters;
           res_norm = std::fabs(rs[i]);
+          if (gmres_trace)
+            printf("GMRES %5d %.6e\n", (int)total_iters,
+                res_norm / ((b_norm > 1e-16) ? b_norm : 1.0));
           if (res_norm <= tol_abs || h_next <= epsmac)
             break;
         }
@@ -543,6 +553,9 @@ namespace opendarts
           ++i;
           ++total_iters;
           res_norm = std::fabs(rs[i]);
+          if (gmres_trace)
+            printf("GMRES %5d %.6e\n", (int)total_iters,
+                res_norm / ((b_norm > 1e-16) ? b_norm : 1.0));
           if (res_norm <= tol_abs || h_next <= epsmac)
             break;
         }

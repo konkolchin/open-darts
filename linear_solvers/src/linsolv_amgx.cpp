@@ -320,7 +320,21 @@ namespace opendarts
         if (li_baseline < 0)
           li_baseline = li_last; // outer-iteration quality of the fresh hierarchy
       }
-      AMGX_solver_setup((AMGX_solver_handle)solver, (AMGX_matrix_handle)A);
+      // The return code used to be discarded: a failed setup then showed up
+      // only as the outer Krylov solver pinning its iteration cap with no
+      // explanation. Report it, fail the setup, and rebuild the hierarchy next
+      // time instead of reusing the one whose setup failed.
+      const AMGX_RC setup_rc =
+          AMGX_solver_setup((AMGX_solver_handle)solver, (AMGX_matrix_handle)A);
+      if (setup_rc != AMGX_RC_OK)
+      {
+        char amgx_err[512] = {0};
+        AMGX_get_error_string(setup_rc, amgx_err, sizeof(amgx_err));
+        printf("AMGX: solver setup failed (%s)\n", amgx_err);
+        force_rebuild_next = true;
+        this->timer_setup->node[timer_key].stop();
+        return -1;
+      }
       n_rows = A_input->n_rows;
 
       this->timer_setup->node[timer_key].stop();

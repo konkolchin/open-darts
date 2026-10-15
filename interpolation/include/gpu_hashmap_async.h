@@ -4,7 +4,7 @@
 #include <cstdint>
 
 #include "multi_index_key.hpp"
-// KERNEL_1D_THREAD, used by expand_hashmap() in the .tpp below. It has to be
+// KERNEL_1D_THREAD and CUDA_CHECK_RETURN, used by create_hashmap()/expand_hashmap() in the .tpp below. It has to be
 // included here rather than in the .tpp, because the .tpp is included inside
 // namespace gpu_hashmap_async and would otherwise declare gpu_tools.h's contents
 // in that namespace (and consume its include guard).
@@ -84,6 +84,11 @@ namespace gpu_hashmap_async
     template <typename vector_element_t, int VECTOR_SIZE>
     __device__ __forceinline__ int bitwise_and_hash(gpu_hash_map<vector_element_t, VECTOR_SIZE> *hashmap, hash_key_t key);
 
+    /**
+     * @brief Allocate an empty device map with a power-of-two slot count above capacity (all keys empty).
+     * @param capacity requested slot count
+     * @return device pointer to the map header; exits the process with a message if a device allocation fails
+     */
     template <typename vector_element_t, int VECTOR_SIZE>
     __host__ gpu_hash_map<vector_element_t, VECTOR_SIZE> *create_hashmap(int capacity);
 

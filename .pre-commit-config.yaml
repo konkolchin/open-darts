@@ -34,12 +34,17 @@ repos:
     rev: v6.0.0
     hooks:
       - id: end-of-file-fixer
+        exclude: ^tests/cpp/data/
       - id: trailing-whitespace
+        exclude: ^tests/cpp/data/
       - id: check-yaml
+        # syntax only: GitLab CI tags such as !reference have no PyYAML constructor (gitlab-ci-verify checks semantics)
+        args: [--unsafe]
         files: ^((.cicd|helper_scripts)/.*\.ya?ml|\.gitlab-ci\.ya?ml)$
       - id: check-toml
         files: ^[^/]+\.toml$
       - id: mixed-line-ending
+        exclude: ^tests/cpp/data/
       - id: detect-private-key
       - id: check-added-large-files
         args: [--maxkb=500]

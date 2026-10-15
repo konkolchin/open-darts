@@ -4,8 +4,9 @@
         # run simulation fot test models set
         - cd models
         # passing additional argument LOG to trigger verbose check performance
-        - systemd-run --scope -p MemoryMax=30000M -p MemoryHigh=20000M --user darts run_test_suite2.py LOG
-        - echo "run_test_suite2 returned" $?
+        # keep the status so the tests below still run when models fail
+        - systemd-run --scope -p MemoryMax=30000M -p MemoryHigh=20000M --user darts run_test_suite2.py LOG || MODELS_STATUS=$?
+        - echo "run_test_suite2 returned ${MODELS_STATUS:-0}"
         - cd ..
         # test interpolators from outside the checkout so Python imports the installed wheel
         - |
@@ -20,6 +21,7 @@
         - cd ../../..
         #
         - echo "test finished"
+        - exit "${MODELS_STATUS:-0}"
     after_script:
         - &archive_logic
             - cd models
@@ -87,6 +89,10 @@ test-linux-oahu-gpu:
     extends: .test-linux-gpu
     variables:
         CONDAPATH: /data/gitlab-runner/miniconda3
+        # Job-private conda package cache (same fix as pre-commit/gitingest):
+        # concurrent tahiti jobs racing on the shared miniconda3/pkgs/ cache
+        # break each other's downloads/extractions.
+        CONDA_PKGS_DIRS: "${CI_PROJECT_DIR}/.conda-pkgs"
     before_script:
         - spack env activate open_darts_gcc134
         - . "${CONDAPATH}/etc/profile.d/conda.sh"
@@ -114,92 +120,88 @@ test-linux-oahu-gpu:
     needs:
         - build-linux-tahiti-gpu
 
-test-linux-tahiti-image-gpu:
+test-apptainer-runtime-gpu:
+    # Runs the suite inside the *runtime* image rather than the builder image,
+    # so what CI exercises is the artifact users are given: the venv, the
+    # trimmed CUDA set, the runscript and the GPU self-test, all of it. The
+    # image already contains this commit's wheel (apptainer-runtime-gpu-image
+    # assembled it around the wheel from build-linux-tahiti-image-gpu), so
+    # there is no conda environment and no pip install here at all.
     tags:
         - linux_tahiti_gpu
     extends: .test-linux-gpu
+    # Shared GPUs: keep two pipelines off the same device.
+    resource_group: tahiti-gpu-runtime
+    variables:
+        APPTAINER_TMPDIR: "/data/gitlab-runner/apptainer-tmp"
+        APPTAINER_CACHEDIR: "/data/gitlab-runner/apptainer-cache"
     before_script:
         - |
           set -euo pipefail
-          if [ -z "${APPTAINER_IMAGE:-}" ]; then
-            echo "APPTAINER_IMAGE is not set (expected from apptainer-image-builder dotenv artifact)"
-            exit 1
-          fi
-          if [ ! -f "$APPTAINER_IMAGE" ]; then
-            echo "Apptainer image does not exist: $APPTAINER_IMAGE"
+          if [ -z "${RUNTIME_IMAGE:-}" ] || [ ! -f "$RUNTIME_IMAGE" ]; then
+            echo "RUNTIME_IMAGE unavailable: ${RUNTIME_IMAGE:-<unset>}" >&2
+            echo "(expected from the apptainer-runtime-gpu-image dotenv artifact)" >&2
             ls -la /data/open-darts-apptainer-images || true
             exit 1
           fi
-          echo "Using Apptainer image: $APPTAINER_IMAGE"
+          echo "Testing inside $RUNTIME_IMAGE"
+          apptainer inspect "$RUNTIME_IMAGE"
+        # Pick a GPU. The preflight runs inside the image because it needs a
+        # Python with dataclasses and the runner's system python3 is 3.6;
+        # nvidia-smi, all it shells out to, is injected by --nv. The env file
+        # goes to a project-local path so the outer shell can source it.
         - |
-          apptainer exec --nv "$APPTAINER_IMAGE" bash -lc "
-            # exit on any error, print commands as you go
-            set -euxo pipefail && \
-            # enable Conda in this shell
-            source /opt/conda/etc/profile.d/conda.sh && \
-            conda create -n ${CONDA_ENV} python=${PY_VER} -q -y && \
-            # activate your env
-            conda activate ${CONDA_ENV} && \
-            # make sure pip is fresh and reinstall your wheel
-            python -m pip install --upgrade pip && \
-            pip uninstall open-darts-flash --yes && \
-            WHEEL_PATH=\$(ls ./dist/*.whl | head -n 1) && \
-            pip install \"\${WHEEL_PATH}[test]\" --force-reinstall
-            "
-        - |
-          # Use a project-local temporary file because the helper runs inside
-          # Apptainer and its exports must be sourced by the outer runner shell.
           gpu_env_file="$(mktemp "${CI_PROJECT_DIR}/.gpu_ci_env.XXXXXX")"
-          export APPTAINERENV_CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-}"
-          export APPTAINERENV_GPU_DEVICE="${GPU_DEVICE:-}"
-          apptainer exec --nv "$APPTAINER_IMAGE" bash -lc "
-            source /opt/conda/etc/profile.d/conda.sh &&
-            conda activate ${CONDA_ENV} &&
-            python '${CI_PROJECT_DIR}/helper_scripts/gpu_ci_preflight.py' \
-              --env-file '${gpu_env_file}'
-          " || {
-            rm -f "$gpu_env_file"
-            exit 1
-          }
+          apptainer exec --nv "$RUNTIME_IMAGE" \
+            python "${CI_PROJECT_DIR}/helper_scripts/gpu_ci_preflight.py" \
+                   --env-file "$gpu_env_file" || { rm -f "$gpu_env_file"; exit 1; }
           source "$gpu_env_file"
           rm -f "$gpu_env_file"
           export APPTAINERENV_CUDA_VISIBLE_DEVICES="$CUDA_VISIBLE_DEVICES"
           export APPTAINERENV_GPU_DEVICE="$GPU_DEVICE"
           export APPTAINERENV_DARTS_CI_PHYSICAL_GPU_DEVICE="${DARTS_CI_PHYSICAL_GPU_DEVICE:-}"
+          # TEST_GPU is read by run_test_suite2.py *inside* the container, so it
+          # has to be forwarded explicitly -- apptainer does not pass it through.
+          export APPTAINERENV_TEST_GPU="$TEST_GPU"
           echo "Selected CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES GPU_DEVICE=$GPU_DEVICE"
     script:
+        # 1. The image's own self-test: imports darts and runs a real CUDA
+        #    kernel. This is what catches a fatbinary carrying no code for this
+        #    GPU, which an import-only check passes straight through.
+        - apptainer test --nv "$RUNTIME_IMAGE"
+        # 2. The model suite. $PWD is bind-mounted read-write, so the models
+        #    write their output and reference pkl files into the workspace.
         - |
-          apptainer exec --nv "$APPTAINER_IMAGE" bash -lc "
-            set -euxo pipefail && \
-            source /opt/conda/etc/profile.d/conda.sh && \
-            conda activate ${CONDA_ENV} && \
-            cd models && \
-            darts run_test_suite2.py LOG && \
-            echo 'run_test_suite2 returned' $? && \
-            cd .. && \
-            # test interpolators from outside the checkout so Python imports the installed wheel
-            PROJECT_DIR=\${CI_PROJECT_DIR:-\$PWD} && \
-            INTERPOLATOR_TEST_WORKDIR=\$(mktemp -d) && \
-            cd \"\$INTERPOLATOR_TEST_WORKDIR\" && \
-            python -m pytest \"\$PROJECT_DIR/tests\" -v && \
-            cd \"\$PROJECT_DIR\" && \
-            # test discretizer
-            cd discretizer/tests/compare_discretizers && \
-            python main.py && \
-            cd ../../.. && \
-            echo 'test finished'
-            "
+          apptainer exec --nv "$RUNTIME_IMAGE" bash -c '
+            set -euo pipefail
+            cd models
+            darts run_test_suite2.py LOG
+          ' || MODELS_STATUS=$?
+        # keep the status so the tests below still run when models fail
+        - echo "run_test_suite2 returned ${MODELS_STATUS:-0}"
+        # 3. Interpolator tests, from outside the checkout so Python imports the
+        #    package installed in the image rather than the source tree.
+        - |
+          # mktemp honours the runner's TMPDIR, which is a host path that is not
+          # necessarily bound inside the container -- so bind it explicitly,
+          # otherwise --pwd cannot chdir into it.
+          WORKDIR="$(mktemp -d)"
+          apptainer exec --nv -B "${CI_PROJECT_DIR}:${CI_PROJECT_DIR}" -B "$WORKDIR" \
+            --pwd "$WORKDIR" \
+            "$RUNTIME_IMAGE" python -m pytest "${CI_PROJECT_DIR}/tests" -v
+          rm -rf "$WORKDIR"
+        # 4. Discretizer comparison.
+        - |
+          apptainer exec --nv "$RUNTIME_IMAGE" bash -c '
+            set -euo pipefail
+            cd discretizer/tests/compare_discretizers
+            python main.py
+          '
+        - echo "test finished"
+        - exit "${MODELS_STATUS:-0}"
     after_script:
-        - |
-            apptainer exec --nv "$APPTAINER_IMAGE" bash -lc "
-                # exit on any error, print commands as you go
-                set -euxo pipefail && \
-                # enable Conda in this shell
-                source /opt/conda/etc/profile.d/conda.sh && \
-                # remove conda env
-                conda env remove -n ${CONDA_ENV} -y || true
-            "
+        # Runs on the host: archive_pkl.sh needs nothing but bash and tar.
+        - *archive_logic
     needs:
-        - job: build-linux-tahiti-image-gpu
-        - job: apptainer-image-builder
+        - job: apptainer-runtime-gpu-image
           artifacts: true

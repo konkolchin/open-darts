@@ -321,6 +321,23 @@ add_feature_info(WITH_AMGX WITH_AMGX "Build the AMGX GPU solver")
 # cuDSS-less GPU machine still builds. Disable explicitly with -D WITH_CUDSS=OFF.
 option(WITH_CUDSS "Build the cuDSS GPU direct solver (prebuilt NVIDIA library)" ON)
 add_feature_info(WITH_CUDSS WITH_CUDSS "Build the cuDSS GPU direct solver")
+# Pin the installed binaries to the CUDA toolkit they were linked against by
+# putting its library directory in the install RPATH (see the CUDA_INSTALL_RPATH
+# block further down for why mixing toolkits breaks the GPU linear solver).
+# Turn OFF for relocatable wheels built against a toolkit path that will not
+# exist on the target machine, if you would rather not ship that path at all.
+option(CUDA_INSTALL_RPATH "Add the CUDA toolkit library dir to the install RPATH of GPU builds" ON)
+add_feature_info(CUDA_INSTALL_RPATH CUDA_INSTALL_RPATH "Pin GPU binaries to the CUDA toolkit they were built against")
+
+# Host CPU ISA baseline for the GPU build (see the CMAKE_CXX_FLAGS block further
+# down). "native" tunes for the machine doing the build, which is what you want
+# for a local or HPC build but is wrong for anything redistributable: the
+# builder's ISA is baked into the binary, so a wheel or container image produced
+# on a newer CPU dies with SIGILL on an older one. Redistributable builds pass a
+# portable baseline instead, e.g. -D CPU_ARCH=x86-64-v3 (AVX2/FMA, Haswell 2013+)
+# or -D CPU_ARCH=x86-64-v2 (SSE4.2, Nehalem 2008+). "off" omits -march entirely.
+set(CPU_ARCH "native" CACHE STRING "Value for -march on GPU builds: native, an explicit ISA (x86-64-v3), or off")
+add_feature_info(CPU_ARCH ON "GPU host code targets -march=${CPU_ARCH}")
 
 # Interpolator compile profile -------------------------------------------------
 # Controls which (i_t, algorithm) interpolator variants are stamped per
@@ -445,8 +462,14 @@ if(CUDA)
         enable_language(CUDA)
         set(CMAKE_CUDA_STANDARD 20)
         set(CMAKE_CUDA_STANDARD_REQUIRED ON)
-        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=native")
-        set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --compiler-options='-march=native' --expt-relaxed-constexpr -allow-unsupported-compiler")
+        if(NOT CPU_ARCH STREQUAL "off")
+            message(STATUS "GPU host code CPU baseline: -march=${CPU_ARCH}")
+            set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=${CPU_ARCH}")
+            set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --compiler-options='-march=${CPU_ARCH}'")
+        else()
+            message(STATUS "GPU host code CPU baseline: -march omitted (CPU_ARCH=off)")
+        endif()
+        set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --expt-relaxed-constexpr -allow-unsupported-compiler")
         # Workaround for CUDA 13.2 + gcc 13 + CCCL ambiguity in cub/block/block_load_to_shared.cuh
         # where unqualified data()/size() calls match both std:: and cuda::std:: overloads for
         # cuda::std::span<char>. We ship a patched copy of the header that fully qualifies those
@@ -584,6 +607,31 @@ if(CUDA)
       INTERFACE
         "${CUDAToolkit_LIBRARY_DIR}"
     )
+
+    # ...and record that same directory in the install RPATH, so the loader
+    # resolves the CUDA libraries from the toolkit we linked against instead of
+    # whatever the ldconfig cache happens to offer first.
+    #
+    # Without this, the CUDA libraries are found only via LD_LIBRARY_PATH /
+    # ldconfig. On a host with several toolkits installed that silently mixes
+    # major versions: cuSPARSE and cuSOLVER kept SONAME major 12 across the
+    # CUDA 12 -> 13 transition, so on a box where a CUDA 13 tree precedes the
+    # CUDA 12 one in /etc/ld.so.conf.d, libcusparse.so.12 is taken from CUDA 13
+    # while libcudart.so.12, libcublas.so.12 and libnvJitLink.so.12 correctly
+    # fall through to CUDA 12 (CUDA 13 ships those as .so.13, so they do not
+    # match). The result is a cuSPARSE from one toolkit inside a process
+    # running another one's runtime: cusparseCreate() fails with "CUDA context
+    # cannot be initialized", AMGX never builds its Resources, and every GPU
+    # linear solve then returns a zero update -- the Newton residual never
+    # moves and the timestep collapses to dt_min.
+    #
+    # Appended last, so darts' own bundled libraries ($ORIGIN entries above)
+    # keep priority. A path that does not exist on the target machine is simply
+    # skipped by the loader, so this is harmless for relocatable wheels.
+    if(CUDA_INSTALL_RPATH)
+      list(APPEND CMAKE_INSTALL_RPATH "${CUDAToolkit_LIBRARY_DIR}")
+      message(STATUS "Adding CUDA toolkit library dir to install RPATH: ${CUDAToolkit_LIBRARY_DIR}")
+    endif()
   endif()
 endif()
 # ------------------------------------------------------------------------------

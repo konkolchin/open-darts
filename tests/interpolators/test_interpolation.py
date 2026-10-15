@@ -364,12 +364,15 @@ def test_evaluate_batch_consistency(n_dim=4):
 
 
 @pytest.mark.parametrize("start_method", [None, "spawn"])
-def test_parallel_evaluator(start_method, n_dim=4):
+@pytest.mark.parametrize("n_pts", [2, 3, 301])
+def test_parallel_evaluator(start_method, n_pts, n_dim=4):
     """ParallelEvaluator.evaluate_batch() must reproduce serial evaluation.
 
     The factory is functools.partial(Linear, ...) — a top-level picklable
     callable. Running with start_method='spawn' reproduces the Windows /
-    macOS multiprocessing behaviour on any platform.
+    macOS multiprocessing behaviour on any platform. n_pts covers the
+    in-process path (2), one-point pool chunks (3) and multi-point chunks with a
+    shorter last one (301).
     """
     n_ops = 6 * n_dim + 17
     factory = functools.partial(Linear, n_dim, n_ops)
@@ -377,7 +380,6 @@ def test_parallel_evaluator(start_method, n_dim=4):
         evaluator_factory=factory, n_workers=4, start_method=start_method
     )
 
-    n_pts = 300
     rng = np.random.default_rng(2)
     states_np = rng.uniform(-1.0, 1.0, size=n_pts * n_dim)
 
@@ -399,6 +401,30 @@ def test_parallel_evaluator(start_method, n_dim=4):
     label = start_method if start_method else 'default'
     print(f'ParallelEvaluator ({label} start method): {"OK" if success else "FAILED"}')
     assert success
+
+
+class Failing(Linear):
+    """Linear, but raises at x_0 > 0.9, like a flash that fails at some states."""
+
+    def evaluate(self, state: value_vector, values: value_vector):
+        if np.asarray(state)[0] > 0.9:
+            raise ValueError("evaluation failed")
+        return super().evaluate(state, values)
+
+
+@pytest.mark.parametrize("n_pts", [3, 301])
+def test_parallel_evaluator_exception(n_pts, n_dim=4):
+    """An evaluator exception in a worker reaches the caller, as without the pool."""
+    n_ops = 6 * n_dim + 17
+    factory = functools.partial(Failing, n_dim, n_ops)
+    par_eval = ParallelEvaluator(evaluator_factory=factory, n_workers=4)
+    states = np.full(n_pts * n_dim, 0.5)
+    states[-n_dim] = 1.0  # the last point fails
+    out = value_vector(np.zeros(n_pts * n_ops))
+    with pytest.warns(UserWarning, match="Falling back to serial"):
+        with pytest.raises(ValueError, match="evaluation failed"):
+            par_eval.evaluate_batch(value_vector(states), n_pts, out, n_ops)
+    par_eval.shutdown()
 
 
 def test_shared_evaluator_pool(n_dim=4):

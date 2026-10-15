@@ -1,6 +1,8 @@
 #ifndef D89802AE_4C88_4BCD_88D1_1B45D12E933F
 #define D89802AE_4C88_4BCD_88D1_1B45D12E933F
 
+#include <cstddef>
+
 
 // define those to avoid warning indication in syntax check for non-nvcc compilers
 #ifndef __NVCC__
@@ -8,6 +10,12 @@
 #define __host__
 #define __device__
 #endif
+
+// Smallest batch for which the CPU interpolators open an OpenMP parallel region. A smaller batch, such as the
+// single well-head state of a well control evaluated several times per Newton iteration, costs less serially than
+// the region, whose fork/join takes tens of microseconds and much longer when the host is loaded. Each state is
+// interpolated independently, so the result does not depend on the path taken.
+constexpr std::size_t interpolator_omp_min_batch = 64;
 
 /**
  * @brief Get the index of interval, which containes specified point coordinate, for specified axis

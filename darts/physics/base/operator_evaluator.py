@@ -7,7 +7,51 @@ from darts.interpolators import operator_set_evaluator_iface, value_vector
 from darts.physics.base.property_container import PropertyContainer
 
 
+def _sum_rows(a):
+    """
+    Row sums of a 2-D array, adding the columns one after another to 0.0. This is the order in which ``np.sum`` adds
+    the entries of a 1-D array of fewer than 8 values, so each row sum equals ``np.sum`` of that row bit for bit.
+
+    :param a: array of shape (n, k)
+    :type a: np.ndarray
+    :returns: row sums, shape (n,)
+    :rtype: np.ndarray
+    """
+    out = np.zeros(a.shape[0])
+    for k in range(a.shape[1]):
+        out = out + a[:, k]
+    return out
+
+
+def _container_batch_applies(container):
+    """
+    Whether the operator sets may evaluate a property container with its batch form: the container implements
+    :meth:`PropertyContainer.evaluate_batch`, its ``evaluate`` is not replaced on the instance, and no class that
+    comes before the one defining ``evaluate_batch`` in the method resolution order of the container overrides
+    ``evaluate`` (a subclass that changes ``evaluate`` would otherwise get the batch values of its parent).
+
+    :param container: property container of an operator set
+    :type container: PropertyContainer
+    :returns: True if ``container.evaluate_batch`` may stand in for ``container.evaluate``
+    :rtype: bool
+    """
+    if 'evaluate' in getattr(container, '__dict__', {}):
+        return False
+    for cls in type(container).__mro__:
+        if 'evaluate_batch' in vars(cls):
+            return cls is not PropertyContainer
+        if 'evaluate' in vars(cls):
+            return False
+    return False
+
+
 class OperatorsBase(operator_set_evaluator_iface):
+    """
+    Base class of the OBL operator sets: the operator values of a state, computed from the phase properties of a
+    property container, for one state (:meth:`evaluate`) or many (:meth:`evaluate_batch`), with composition
+    extrapolation for states outside the composition simplex.
+    """
+
     n_ops: int
 
     def __init__(
@@ -30,6 +74,8 @@ class OperatorsBase(operator_set_evaluator_iface):
         super().__init__()
 
         self.property = property_container
+        # Describe this operator's input, not just the shared property container.
+        self.n_history = getattr(property_container, 'n_history', 0)
 
         self.thermal = thermal
 
@@ -66,24 +112,132 @@ class OperatorsBase(operator_set_evaluator_iface):
 
     def evaluate_batch(self, states, n_points, values, n_ops):
         """
-        Default serial batch evaluation: loops calling evaluate() per point.
+        Serial batch evaluation. Operator sets with a vectorised assembly (:meth:`_evaluate_batch_vectorised`)
+        evaluate in one go the points whose properties their container evaluates as a batch
+        (:meth:`PropertyContainer.evaluate_batch`); every other point is evaluated with evaluate(), one by one.
         Override in a subclass or wrapper (e.g. ParallelEvaluator) for parallel dispatch.
 
         :param states: Flat array of coordinates [n_points * n_dims]
+        :type states: value_vector | np.ndarray
         :param n_points: Number of points to evaluate
-        :param values: Flat output array [n_points * n_ops], pre-allocated
+        :type n_points: int
+        :param values: Flat output array [n_points * n_ops], pre-allocated, written in place
+        :type values: value_vector | np.ndarray
         :param n_ops: Number of operators per point
+        :type n_ops: int
         :return: 0 if successful
+        :rtype: int
         """
+        if n_points <= 0:
+            return 0
         states_np = np.asarray(states)
         values_np = np.asarray(values)
         n_dims = len(states_np) // n_points
-        for i in range(n_points):
+        done = self._evaluate_batch_vectorised(
+            states_np[: n_points * n_dims].reshape(n_points, n_dims),
+            values_np[: n_points * n_ops].reshape(n_points, n_ops),
+        )
+        remaining = range(n_points) if done is None else np.flatnonzero(~done)
+        for i in remaining:
             sv = value_vector(states_np[i * n_dims : (i + 1) * n_dims].copy())
             vv = value_vector(np.zeros(n_ops))
             self.evaluate(sv, vv)
             values_np[i * n_ops : (i + 1) * n_ops] = np.asarray(vv)
         return 0
+
+    def _evaluate_batch_vectorised(self, states, values):
+        """
+        Vectorised evaluation of many points, used by :meth:`evaluate_batch`. It writes the operator values of the
+        points it evaluates into their rows of ``values`` and returns a mask of those points. The base class
+        evaluates none and returns None; operator sets with a vectorised assembly override it.
+
+        :param states: states, one per row (n_points, n_dims)
+        :type states: np.ndarray
+        :param values: operator values, one row per state (n_points, n_ops), written in place
+        :type values: np.ndarray
+        :returns: mask of the points written, or None if none were
+        :rtype: np.ndarray | None
+        """
+        return None
+
+    def _property_batch(self, states, owner, methods):
+        """
+        Properties of the points of ``states`` that a vectorised assembly may evaluate: the points that
+        :meth:`apply_extrapolation` does not extrapolate, evaluated by :meth:`PropertyContainer.evaluate_batch`.
+
+        Returns None (every point then takes the scalar path) for thermal physics; when a method in ``methods`` is
+        overridden below ``owner``, the class whose code the vectorised assembly repeats, or replaced on this
+        instance; when the batch form of the container may not reproduce its ``evaluate``
+        (:func:`_container_batch_applies`); and with 8 or more components or phases, where ``np.sum`` no longer adds
+        sequentially.
+
+        :param states: states, one per row
+        :type states: np.ndarray
+        :param owner: class whose methods the vectorised assembly of the caller repeats
+        :type owner: type
+        :param methods: names of those methods
+        :type methods: tuple[str, ...]
+        :returns: (row indices into ``states``, PropertyBatch of those rows), or None
+        :rtype: tuple[np.ndarray, PropertyBatch] | None
+        """
+        if self.thermal or self.nc >= 8 or self.nph >= 8:
+            return None
+        replaced = getattr(self, '__dict__', {})
+        if any(
+            m in replaced or getattr(type(self), m) is not getattr(owner, m)
+            for m in methods
+        ):
+            return None
+        if not _container_batch_applies(self.property):
+            return None
+        rows = np.arange(states.shape[0])
+        if self.nc > 2 and self.extrapolation_flag:
+            # the test of apply_extrapolation on z_last = 1 - sum(z_0..z_nc-2)
+            z_last = 1 - _sum_rows(states[:, 1 : self.nc])
+            rows = rows[~(z_last < 0.99 * self.eps_z)]
+        if rows.size == 0:
+            return None
+        batch = self.property.evaluate_batch(states[rows])
+        if batch is None:
+            return None
+        return rows, batch
+
+    def _batch_compositions(self, states):
+        """
+        Overall compositions [z_0, ..., z_nc-2, 1 - sum] of states, one row per state, as evaluate() builds zc.
+
+        :param states: states, one per row
+        :type states: np.ndarray
+        :returns: compositions, shape (n, nc)
+        :rtype: np.ndarray
+        """
+        zc = np.empty((states.shape[0], self.nc))
+        zc[:, : self.nc - 1] = states[:, 1 : self.nc]
+        zc[:, self.nc - 1] = 1 - _sum_rows(states[:, 1 : self.nc])
+        return zc
+
+    @staticmethod
+    def _write_batch(values, rows, batch, op_values):
+        """
+        Copy the operator values of the points the container evaluated into ``values``.
+
+        :param values: operator values of all points of the batch call (n_points, n_ops), written in place
+        :type values: np.ndarray
+        :param rows: row indices into ``values`` of the points passed to the container
+        :type rows: np.ndarray
+        :param batch: properties returned by the container for those points
+        :type batch: PropertyBatch
+        :param op_values: operator values of those points (len(rows), n_ops)
+        :type op_values: np.ndarray
+        :returns: mask of the rows of ``values`` written
+        :rtype: np.ndarray
+        """
+        evaluated = np.asarray(batch.evaluated, dtype=bool)
+        written = rows[evaluated]
+        values[written] = op_values[evaluated]
+        done = np.zeros(values.shape[0], dtype=bool)
+        done[written] = True
+        return done
 
     def apply_extrapolation(self, state, values):
         """
@@ -109,10 +263,16 @@ class OperatorsBase(operator_set_evaluator_iface):
         When composition lies outside the simplex (∑ z_i ≠ 1 or some z_i < 0), perform exact hyperplane extrapolation:
         Fit each operator value via val = a·z + c through exactly d+1 valid reference points ,
         then evaluate at the out‑of‑bounds composition. Pressure (and temperature) remain constant.
-        State layout: [ p, z₁, …, z_d, (T) ]
+        State layout: [ p, z₁, …, z_d, (T), (h₁, …, h_n) ] with n = self.n_history OBL history variables,
+        which are kept constant as well.
         """
-        # Unpack state
+        # Unpack state; OBL history variables (e.g. sg_max) trail the primary state and are carried
+        # unchanged into every reference state
         vec = state.to_numpy()
+        n_history = self.n_history
+        history = vec[len(vec) - n_history :] if n_history else np.empty(0)
+        if n_history:
+            vec = vec[: len(vec) - n_history]
         if self.thermal:
             p, T = vec[0], vec[-1]
             z = vec[1:-1].copy()
@@ -223,9 +383,9 @@ class OperatorsBase(operator_set_evaluator_iface):
         vals_list = []
         for zp in supporting_points:
             if self.thermal:
-                ref_state = value_vector(np.concatenate(([p], zp, [T])))
+                ref_state = value_vector(np.concatenate(([p], zp, [T], history)))
             else:
-                ref_state = value_vector(np.concatenate(([p], zp)))
+                ref_state = value_vector(np.concatenate(([p], zp, history)))
             ref_vals = value_vector(np.zeros(self.n_ops))
             self.evaluate(ref_state, ref_vals)
             zps_list.append(zp)
@@ -370,6 +530,50 @@ class WellCtrlOperators(OperatorsBase):
 
         return 0
 
+    def _evaluate_batch_vectorised(self, states, values):
+        """
+        :meth:`evaluate` for all points whose properties the container evaluates as a batch, with numpy arrays.
+        Each operator repeats the arithmetic of :meth:`evaluate` and :meth:`_fill_rate_ctrl_ops`, so the values are
+        bitwise identical to the scalar ones.
+
+        :param states: states, one per row (n_points, n_dims)
+        :type states: np.ndarray
+        :param values: operator values, one row per state (n_points, n_ops), written in place
+        :type values: np.ndarray
+        :returns: mask of the points written, or None if none were
+        :rtype: np.ndarray | None
+        """
+        if values.shape[1] < self.n_ops:
+            return None
+        found = self._property_batch(
+            states,
+            WellCtrlOperators,
+            ('evaluate', 'apply_extrapolation', '_fill_rate_ctrl_ops'),
+        )
+        if found is None:
+            return None
+        rows, b = found
+        nph = self.nph
+        # an interpolator may hold more operators than this set; they stay 0, as in evaluate()
+        v = np.zeros((rows.size, values.shape[1]))
+        with np.errstate(all='ignore'):
+            for j in range(self.property.np_fl):
+                on = b.present[:, j]
+                epm_rate_factor = b.kr[:, j] / b.mu[:, j]
+                dfm_rate_factor = b.sat[:, j]
+                for offset, rate_factor in (
+                    (self.epm_rate_ctrl_ops_offset, epm_rate_factor),
+                    (self.dfm_rate_ctrl_ops_offset, dfm_rate_factor),
+                ):
+                    v[:, offset + j] = np.where(on, b.dens_m[:, j] * rate_factor, 0.0)
+                    v[:, offset + nph + j] = np.where(
+                        on, b.dens[:, j] * rate_factor, 0.0
+                    )
+                    v[:, offset + 2 * nph + j] = np.where(on, rate_factor, 0.0)
+        v[:, self.state_ctrl_ops_offset + 0] = states[rows, 0]
+        v[:, self.state_ctrl_ops_offset + 1] = b.temperature
+        return self._write_batch(values, rows, b, v)
+
 
 class ThermalVarOperator(OperatorsBase):
     """
@@ -399,6 +603,8 @@ class ThermalVarOperator(OperatorsBase):
 
         self.n_ops = 1
         self.is_pt = is_pt
+        # The thermal-variable interpolator consumes primary PT state only.
+        self.n_history = 0
 
     def evaluate(self, state_pt, values):
         # Check if extrapolation needs to be applied
@@ -411,7 +617,7 @@ class ThermalVarOperator(OperatorsBase):
         if not self.thermal:
             values_np[0] = self.property.temperature
         elif self.is_pt:
-            values_np[0] = state_pt[-1]
+            values_np[0] = state_pt[self.nc]
         else:
             values_np[0] = self.property.compute_total_enthalpy(state_pt=state_pt)
 
@@ -564,6 +770,8 @@ class OperatorsSuper(OperatorsBase):
 
 
 class ReservoirOperators(OperatorsSuper):
+    """Reservoir operators of the super engine for the property container of one region."""
+
     def evaluate(self, state, values):
         """
         Evaluate the non-thermal reservoir operators for the super engine
@@ -679,6 +887,88 @@ class ReservoirOperators(OperatorsSuper):
 
         return 0
 
+    def _evaluate_batch_vectorised(self, states, values):
+        """
+        :meth:`evaluate` for all points whose properties the container evaluates as a batch, with numpy arrays.
+        Each operator repeats the arithmetic of :meth:`evaluate` term by term and in the same order, so the values
+        are bitwise identical to the scalar ones.
+
+        :param states: states, one per row (n_points, n_dims)
+        :type states: np.ndarray
+        :param values: operator values, one row per state (n_points, n_ops), written in place
+        :type values: np.ndarray
+        :returns: mask of the points written, or None if none were
+        :rtype: np.ndarray | None
+        """
+        if values.shape[1] < self.n_ops:
+            return None
+        found = self._property_batch(
+            states, ReservoirOperators, ('evaluate', 'apply_extrapolation')
+        )
+        if found is None:
+            return None
+        rows, b = found
+        st = states[rows]
+        zc = self._batch_compositions(st)
+        nc_fl, np_fl, ns, ne = self.nc_fl, self.np_fl, self.ns, self.ne
+        compr = b.rock_compr
+        density_tot = _sum_rows(b.sat[:, :np_fl] * b.dens_m[:, :np_fl])
+        phi_f = 1.0 - _sum_rows(zc[:, nc_fl:])
+        z_s = zc[:, nc_fl : nc_fl + ns]
+
+        # an interpolator may hold more operators than this set; they stay 0, as in evaluate()
+        v = np.zeros((rows.size, values.shape[1]))
+        with np.errstate(all='ignore'):
+            v[:, self.ACC_OP : self.ACC_OP + nc_fl] = (compr * density_tot)[
+                :, None
+            ] * zc[:, :nc_fl]
+            v[:, self.ACC_OP + nc_fl : self.ACC_OP + nc_fl + ns] = (
+                compr[:, None] * b.dens_m[:, np_fl : np_fl + ns]
+            ) * z_s
+            for j in range(np_fl):
+                on = b.present[:, j]
+                x_j = b.x[:, j, :nc_fl]
+                flux = self.FLUX_OP + j * ne
+                v[:, flux : flux + nc_fl] = np.where(
+                    on[:, None], x_j * b.dens_m[:, j : j + 1], 0.0
+                )
+                v[:, self.DENS_OP + j] = np.where(on, b.dens_m[:, j], 0.0)
+                v[:, self.UPSAT_OP + j] = np.where(
+                    on, (compr * phi_f) * b.sat[:, j], 0.0
+                )
+                if on.any():
+                    D = self.property.diffusion_ev[
+                        self.property.phases_name[j]
+                    ].evaluate()
+                    grad = self.GRAD_OP + j * ne
+                    v[:, grad : grad + nc_fl] = np.where(
+                        on[:, None], np.asarray(D)[:nc_fl] * x_j, 0.0
+                    )
+                v[:, self.GRAV_OP + j] = np.where(on, b.dens[:, j], 0.0)
+                v[:, self.LAMBDA_OP + j] = np.where(on, b.kr[:, j] / b.mu[:, j], 0.0)
+                v[:, self.SAT_OP + j] = np.where(on, b.sat[:, j], 0.0)
+            v[:, self.UPSAT_OP + np_fl : self.UPSAT_OP + np_fl + ns] = (
+                compr[:, None] * z_s
+            )
+        v[:, self.KIN_OP : self.KIN_OP + self.nc] = b.mass_source
+        v[:, self.PC_OP : self.PC_OP + np_fl] = b.pc
+        v[:, self.MULT_OP] = self._batch_permporo_mult(phi_f)
+        v[:, self.PRES_OP] = st[:, 0]
+        return self._write_batch(values, rows, b, v)
+
+    def _batch_permporo_mult(self, phi_f):
+        """
+        ``permporo_mult_ev.evaluate(phi_f)`` of every point, one call per distinct ``phi_f``.
+
+        :param phi_f: fluid volume fractions of the points
+        :type phi_f: np.ndarray
+        :returns: permeability multipliers of the points
+        :rtype: np.ndarray
+        """
+        unique, inverse = np.unique(phi_f, return_inverse=True)
+        mult = [self.property.permporo_mult_ev.evaluate(u) for u in unique]
+        return np.asarray(mult, dtype=float).reshape(unique.size)[inverse.reshape(-1)]
+
     def evaluate_thermal(self, state, values):
         """
         Evaluate the thermal reservoir operators for the super engine
@@ -745,6 +1035,11 @@ class ReservoirOperators(OperatorsSuper):
 
 
 class WellOperators(OperatorsSuper):
+    """
+    Well-segment operators of the super engine, in the layout of :class:`ReservoirOperators`: no rock compaction,
+    diffusion or capillary pressure, and a permeability-porosity multiplier of 1.
+    """
+
     def evaluate(self, state, values):
         """
         Evaluate the non-thermal well operators for the super engine
@@ -842,6 +1137,55 @@ class WellOperators(OperatorsSuper):
         # self.print_operators(state, values)
 
         return 0
+
+    def _evaluate_batch_vectorised(self, states, values):
+        """
+        :meth:`evaluate` for all points whose properties the container evaluates as a batch, with numpy arrays.
+        Each operator repeats the arithmetic of :meth:`evaluate` term by term and in the same order, so the values
+        are bitwise identical to the scalar ones.
+
+        :param states: states, one per row (n_points, n_dims)
+        :type states: np.ndarray
+        :param values: operator values, one row per state (n_points, n_ops), written in place
+        :type values: np.ndarray
+        :returns: mask of the points written, or None if none were
+        :rtype: np.ndarray | None
+        """
+        if values.shape[1] < self.n_ops:
+            return None
+        found = self._property_batch(
+            states, WellOperators, ('evaluate', 'apply_extrapolation')
+        )
+        if found is None:
+            return None
+        rows, b = found
+        st = states[rows]
+        zc = self._batch_compositions(st)
+        nc_fl, np_fl, ns, ne = self.nc_fl, self.np_fl, self.ns, self.ne
+        density_tot = _sum_rows(b.sat[:, :np_fl] * b.dens_m[:, :np_fl])
+
+        # an interpolator may hold more operators than this set; they stay 0, as in evaluate()
+        v = np.zeros((rows.size, values.shape[1]))
+        with np.errstate(all='ignore'):
+            v[:, self.ACC_OP : self.ACC_OP + nc_fl] = (
+                density_tot[:, None] * zc[:, :nc_fl]
+            )
+            v[:, self.ACC_OP + nc_fl : self.ACC_OP + nc_fl + ns] = (
+                b.dens_m[:, np_fl : np_fl + ns] * zc[:, nc_fl : nc_fl + ns]
+            )
+            for j in range(np_fl):
+                on = b.present[:, j]
+                flux = self.FLUX_OP + j * ne
+                v[:, flux : flux + nc_fl] = np.where(
+                    on[:, None], b.x[:, j, :nc_fl] * b.dens_m[:, j : j + 1], 0.0
+                )
+                v[:, self.GRAV_OP + j] = np.where(on, b.dens[:, j], 0.0)
+                v[:, self.LAMBDA_OP + j] = np.where(on, b.kr[:, j] / b.mu[:, j], 0.0)
+                v[:, self.SAT_OP + j] = np.where(on, b.sat[:, j], 0.0)
+        v[:, self.KIN_OP : self.KIN_OP + self.nc] = b.mass_source
+        v[:, self.MULT_OP] = 1.0
+        v[:, self.PRES_OP] = st[:, 0]
+        return self._write_batch(values, rows, b, v)
 
     def evaluate_thermal(self, state, values):
         """

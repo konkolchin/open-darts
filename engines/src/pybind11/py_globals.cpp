@@ -104,6 +104,7 @@ void pybind_globals(py::module &m)
     //properties
     .def_readwrite("max_i_linear", &sim_params::max_i_linear)
     .def_readwrite("tolerance_linear", &sim_params::tolerance_linear)
+    .def_readwrite("gmres_restart", &sim_params::gmres_restart)
     .def_readwrite("linear_type", &sim_params::linear_type)
     .def_readwrite("linear_params", &sim_params::linear_params)
     .def_readwrite("enable_permporo", &sim_params::enable_permporo)
@@ -117,6 +118,11 @@ void pybind_globals(py::module &m)
         "Preferred eliminated equation rows (length K) for GPU local Schur elimination")
     .def_readwrite("schur_elim_cols", &sim_params::schur_elim_cols,
         "Eliminated unknown columns (length K) for GPU local Schur elimination")
+    .def_readwrite("block_row_perm", &sim_params::block_row_perm,
+        "Block-local equation order for the GPU linear solver (empty = off): entry r is the "
+        "original local equation placed in local row r. The solver works on P A x = P b. "
+        "Natural order for a model whose first equation is a non-flowing mineral balance: "
+        "[n_vars-1, 0, .., n_vars-2]. Combines with schur_elim_count (pairs in the original numbering).")
     .def_readwrite("finalize_mpi", &sim_params::finalize_mpi)
     .def_readwrite("phase_existence_tolerance", &sim_params::phase_existence_tolerance)
     .def_readwrite("linear_print_level", &sim_params::linear_print_level);

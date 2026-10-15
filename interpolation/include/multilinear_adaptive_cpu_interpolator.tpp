@@ -106,7 +106,17 @@ multilinear_adaptive_cpu_interpolator<value_t, N_DIMS, N_OPS>::get_hypercube_dat
   hypercube_data_t new_hypercube;
   this->get_hypercube_vertex_keys(hypercube_key, vertex_keys);
 
+  // Evaluate the vertices that are not cached yet with one evaluate_batch() call, so a
+  // vectorised or parallel evaluator handles them together; a single missing vertex is
+  // left to the per-point evaluate() in get_point_data().
   static const uint32_t N_VERTS = (1u << N_DIMS);
+  std::vector<key_t> missing_vertices;
+  for (uint32_t i = 0; i < N_VERTS; ++i)
+    if (point_data.find(vertex_keys[i]) == point_data.end())
+      missing_vertices.push_back(vertex_keys[i]);
+  if (missing_vertices.size() > 1)
+    evaluate_points(missing_vertices);
+
   for (uint32_t i = 0; i < N_VERTS; ++i)
   {
     const point_data_t &p_data = this->get_point_data(vertex_keys[i]);
@@ -176,6 +186,58 @@ int multilinear_adaptive_cpu_interpolator<value_t, N_DIMS, N_OPS>::interpolate(
 // ─── batch materialization ─────────────────────────────────────────────────────
 
 template <typename value_t, uint8_t N_DIMS, uint16_t N_OPS>
+void multilinear_adaptive_cpu_interpolator<value_t, N_DIMS, N_OPS>::evaluate_points(
+    const std::vector<key_t> &point_keys)
+{
+  if (this->timer) this->timer->node["body generation"].node["point generation"].start();
+
+  const size_t n_missing = point_keys.size();
+
+  std::vector<double> batch_coords(n_missing * N_DIMS);
+  point_coordinates_t local_coords(N_DIMS);
+  for (size_t i = 0; i < n_missing; ++i)
+  {
+    this->get_point_coordinates_from_key(point_keys[i], local_coords);
+    std::copy(local_coords.begin(), local_coords.end(),
+              batch_coords.begin() + i * N_DIMS);
+  }
+
+  std::vector<double> batch_values(n_missing * N_OPS);
+  this->supporting_point_evaluator->evaluate_batch(
+      batch_coords, static_cast<int>(n_missing), batch_values, N_OPS);
+
+  for (size_t i = 0; i < n_missing; ++i)
+  {
+    const key_t &pt_key = point_keys[i];
+    point_data_t new_point;
+    for (int op = 0; op < N_OPS; op++)
+    {
+      double val = batch_values[i * N_OPS + op];
+      new_point[op] = val;
+      // isfinite (not just isnan): an inf operator poisons every hypercube
+      // touching this point just like a nan does (inf * 0-weight = nan).
+      if (!std::isfinite(val))
+      {
+        printf("OBL generation warning: non-finite operator detected! Operator %d for point (", op);
+        for (int a = 0; a < N_DIMS; a++)
+        {
+          printf("%lf, ", batch_coords[i * N_DIMS + a]);
+        }
+        printf(") is %lf\n", val);
+      }
+    }
+    point_data.emplace(pt_key, new_point);
+    // Mark for append-only cache flush after this new point is materialized.
+    dirty_point_data.insert(pt_key);
+    // Stamp the point with the current batch-interpolation (nonlinear-iteration) index.
+    dirty_point_epochs[pt_key] = eval_index;
+    this->n_points_used++;
+  }
+
+  if (this->timer) this->timer->node["body generation"].node["point generation"].stop();
+}
+
+template <typename value_t, uint8_t N_DIMS, uint16_t N_OPS>
 void multilinear_adaptive_cpu_interpolator<value_t, N_DIMS, N_OPS>::materialize_missing_cache(
     const std::vector<key_t> &missing_hc)
 {
@@ -205,53 +267,8 @@ void multilinear_adaptive_cpu_interpolator<value_t, N_DIMS, N_OPS>::materialize_
   // Phase 2b: batch-evaluate missing points
   if (!all_point_keys.empty())
   {
-    if (this->timer) this->timer->node["body generation"].node["point generation"].start();
-
-    const size_t n_missing = all_point_keys.size();
-
-    std::vector<double> batch_coords(n_missing * N_DIMS);
-    point_coordinates_t local_coords(N_DIMS);
-    for (size_t i = 0; i < n_missing; ++i)
-    {
-      this->get_point_coordinates_from_key(all_point_keys[i], local_coords);
-      std::copy(local_coords.begin(), local_coords.end(),
-                batch_coords.begin() + i * N_DIMS);
-    }
-
-    std::vector<double> batch_values(n_missing * N_OPS);
-    this->supporting_point_evaluator->evaluate_batch(
-        batch_coords, static_cast<int>(n_missing), batch_values, N_OPS);
-
-    point_data.reserve(point_data.size() + n_missing);
-    for (size_t i = 0; i < n_missing; ++i)
-    {
-      const key_t &pt_key = all_point_keys[i];
-      point_data_t new_point;
-      for (int op = 0; op < N_OPS; op++)
-      {
-        double val = batch_values[i * N_OPS + op];
-        new_point[op] = val;
-        // isfinite (not just isnan): an inf operator poisons every hypercube
-        // touching this point just like a nan does (inf * 0-weight = nan).
-        if (!std::isfinite(val))
-        {
-          printf("OBL generation warning: non-finite operator detected! Operator %d for point (", op);
-          for (int a = 0; a < N_DIMS; a++)
-          {
-            printf("%lf, ", batch_coords[i * N_DIMS + a]);
-          }
-          printf(") is %lf\n", val);
-        }
-      }
-      point_data.emplace(pt_key, new_point);
-      // Mark for append-only cache flush after this new point is materialized.
-      dirty_point_data.insert(pt_key);
-      // Stamp the point with the current batch-interpolation (nonlinear-iteration) index.
-      dirty_point_epochs[pt_key] = eval_index;
-      this->n_points_used++;
-    }
-
-    if (this->timer) this->timer->node["body generation"].node["point generation"].stop();
+    point_data.reserve(point_data.size() + all_point_keys.size());
+    evaluate_points(all_point_keys);
   }
 
   // Phase 2c: assemble missing hypercube payloads in parallel from the now-complete
@@ -263,7 +280,7 @@ void multilinear_adaptive_cpu_interpolator<value_t, N_DIMS, N_OPS>::materialize_
   std::vector<std::pair<key_t, hypercube_data_t>> new_hc_entries(missing_hc.size());
 
 #ifdef _OPENMP
-#pragma omp parallel for schedule(static)
+#pragma omp parallel for schedule(static) if (missing_hc.size() >= interpolator_omp_min_batch)
 #endif
   for (int h = 0; h < static_cast<int>(missing_hc.size()); ++h)
   {
@@ -372,7 +389,7 @@ int multilinear_adaptive_cpu_interpolator<value_t, N_DIMS, N_OPS>::interpolate_w
   long long batch_overflows = 0;
 
 #ifdef _OPENMP
-#pragma omp parallel for schedule(static) reduction(+ : batch_overflows)
+#pragma omp parallel for schedule(static) reduction(+ : batch_overflows) if (n_cells >= interpolator_omp_min_batch)
 #endif
   for (int p = 0; p < static_cast<int>(n_cells); p++)
   {
@@ -429,7 +446,7 @@ int multilinear_adaptive_cpu_interpolator<value_t, N_DIMS, N_OPS>::interpolate_w
   static const size_t workspace_size = (2 * N_VERTS - 1) * N_OPS;
 
 #ifdef _OPENMP
-#pragma omp parallel
+#pragma omp parallel if (n_cells >= interpolator_omp_min_batch)
 #endif
   {
     std::vector<value_t> workspace(workspace_size);

@@ -1,0 +1,241 @@
+# =============================================================================
+# open-DARTS *builder* image (CI)
+# =============================================================================
+# The compile environment build-linux-tahiti-image-gpu uses to produce the
+# wheel: CUDA devel toolkit, gcc-toolset-13, Miniconda. It is not meant to be
+# shipped to users, and the test jobs no longer run in it either -- see
+# runtime-gpu-image.def for the slim, relocatable image that runs open-DARTS
+# models on GPUs, which is what test-apptainer-runtime-gpu exercises.
+#
+#   apptainer build --fakeroot open-darts-builder.sif builder-gpu-image.def
+#   apptainer build --fakeroot --build-arg CUDA_VERSION=13.0.2 ... # match a runner
+#
+# Building on NFS fails with an xattr error while unpacking the base layer;
+# point APPTAINER_TMPDIR at local disk (the CI job does this already).
+# =============================================================================
+
+Bootstrap: docker
+From:      nvidia/cuda:{{ CUDA_VERSION }}-devel-rockylinux8
+
+%arguments
+    # Keep in step with the CUDA the target runner exposes. 12.8 is the default
+    # because it is the only toolkit that still compiles for Volta (sm_70) and
+    # already compiles for Blackwell (sm_120), which is the span of GPUs the
+    # project's runners cover.
+    CUDA_VERSION=12.8.1
+    ENABLE_AGENT_TOOLS=0
+    PY_VER=3.12
+
+%labels
+    PROJECT           open-darts
+    ROLE              builder
+    CUDA_VERSION_ARG  {{ CUDA_VERSION }}
+    AGENT_TOOLS       {{ ENABLE_AGENT_TOOLS }}
+
+%environment
+    # Apptainer passes the caller's environment straight into the container, and
+    # on an HPC login node or a runner with modules loaded that environment
+    # names the HOST toolchain. GCC_ROOT is the one that really hurts: with a
+    # spack/lmod gcc module loaded outside, the container's own g++ resolves its
+    # internal header directory under that host prefix, and *every* compile in
+    # here dies with
+    #     fatal error: stddef.h: No such file or directory
+    # while the headers sit untouched in the image. Measured on the tahiti/oahu
+    # nodes, where a loaded gcc module points GCC_ROOT at a /palmyra spack tree.
+    #
+    # These are overridden rather than unset on purpose: Apptainer collects the
+    # variables this script *exports* and lays them over the inherited
+    # environment, so an `unset` here is silently ignored (verified). Pointing
+    # them at the image's own toolchain is also the more useful value.
+    #
+    # `apptainer exec --cleanenv` avoids the whole class of problem, but only if
+    # every call site remembers; this makes the image right by default. Set
+    # DARTS_KEEP_HOST_TOOLCHAIN_ENV=1 to keep whatever the caller had.
+    # The caller's TMPDIR comes along with the environment, and on the CI
+    # runners it names a host path (/data/gitlab-runner/tmp) that is not bound
+    # inside the container. Anything writing there then fails in a way that
+    # looks nothing like the cause -- nvcc, for one, dies with
+    #     nvcc fatal : Could not open output file '/data/gitlab-runner/tmp/tmpxft_...'
+    # Only replace it when it is genuinely unusable: under `apptainer exec` on
+    # those runners it *is* usable and points at a large disk, and forcing
+    # compiles onto a small /tmp instead would trade this bug for a worse one.
+    if [ -n "${TMPDIR:-}" ] && { [ ! -d "$TMPDIR" ] || [ ! -w "$TMPDIR" ]; }; then
+        export TMPDIR=/tmp
+    fi
+    if [ -z "${DARTS_KEEP_HOST_TOOLCHAIN_ENV:-}" ]; then
+        export GCC_ROOT=/opt/rh/gcc-toolset-13/root
+        export CC=/opt/rh/gcc-toolset-13/root/usr/bin/gcc
+        export CXX=/opt/rh/gcc-toolset-13/root/usr/bin/g++
+        export CMAKE_PREFIX_PATH=
+    fi
+    # conda has the same exposure, via $HOME rather than the environment: it is
+    # bind-mounted, so the caller's ~/.condarc drives the container's conda. On
+    # a workstation with mambaforge that means host channels and a host package
+    # cache the container cannot write, and `conda create` fails with
+    #     NoWritablePkgsDirError: /.../mambaforge/pkgs
+    # Pin the config to the image's own and put the package cache somewhere
+    # writable. CONDA_ENVS_DIRS is deliberately left alone so `conda create -n`
+    # keeps behaving as it does for the existing CI jobs.
+    if [ -z "${DARTS_KEEP_HOST_CONDA_ENV:-}" ]; then
+        export CONDARC=/opt/conda/.condarc
+        export CONDA_PKGS_DIRS="${CONDA_PKGS_DIRS:-${TMPDIR:-/tmp}/conda-pkgs-$(id -u)}"
+        # An inherited CONDA_PREFIX/CONDA_SHLVL describes an environment on the
+        # host that does not exist in here; conda then reports
+        # "EnvironmentLocationNotFound" on otherwise fine commands and
+        # `conda activate` tries to unwind a stack that was never pushed.
+        # These values are simply the truth for this image.
+        export CONDA_PREFIX=/opt/conda
+        export CONDA_SHLVL=0
+    fi
+    source /opt/rh/gcc-toolset-13/enable
+    source /opt/conda/etc/profile.d/conda.sh
+
+%post
+    # exiting pipeline with a non-zero exit code if any command in a pipeline fails
+    set -euo pipefail
+
+    # install base packages
+    dnf -y clean all
+    dnf -y upgrade
+    dnf -y install epel-release dnf-plugins-core
+    dnf -y install --setopt=install_weak_deps=False --setopt=tsflags=nodocs \
+        jq patchelf wget git ca-certificates which tar xz bzip2 make cmake \
+        python3 python3-pip libjpeg-turbo-devel gcc-toolset-13-gcc-c++ mesa-libGLU \
+        libXrender libX11 libXext libXi libXfixes libXcursor libXrandr libXinerama \
+        libXmu libXt libXft fontconfig freetype
+    echo 'source /opt/rh/gcc-toolset-13/enable' >> /etc/profile.d/gcc13.sh
+
+    # miniconda installation (quiet; keep errors visible)
+    CONDA_DIR=/opt/conda
+    curl -fsSL https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -o /tmp/miniconda.sh
+    ( set +x; bash /tmp/miniconda.sh -b -p "$CONDA_DIR" >/dev/null )
+    rm -f /tmp/miniconda.sh
+    # do not run 'conda init' in containers; source only when needed
+    ( set +x; . /opt/conda/etc/profile.d/conda.sh >/dev/null 2>&1 || true )
+    "$CONDA_DIR/bin/conda" clean -a -y -q >/dev/null
+    "$CONDA_DIR/bin/conda" tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main >/dev/null
+    "$CONDA_DIR/bin/conda" tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r >/dev/null
+    # CONDARC (see %environment) points here, so it has to exist. Empty is the
+    # right content: it means "conda's defaults", not "the caller's ~/.condarc".
+    : > "$CONDA_DIR/.condarc"
+
+
+    # cleanup & size reduction
+    dnf -y remove gmp-devel mpfr-devel libmpc-devel isl-devel zlib-devel || true
+    dnf -y autoremove
+    dnf clean all
+
+    # ---------------------------------------------------------------------
+    # Trim the CUDA toolkit
+    # ---------------------------------------------------------------------
+    # The devel image carries ~2.3 GB of static CUDA archives. Reading the link
+    # lines of an actual open-DARTS GPU build, the only two the build consumes
+    # are libcudart_static.a and libculibos.a, both pulled in implicitly by
+    # nvcc; everything else (libcublasLt_static.a alone is 767 MB) is there for
+    # link modes open-DARTS does not use. cuSOLVER-MG is the multi-GPU
+    # front-end, which neither open-DARTS nor AMGX references.
+    #
+    # Keep this to files that are provably unused: an over-eager delete here
+    # surfaces as a confusing link failure in CI, not as a smaller image.
+    CUDA_LIB_DIRS=$(find /usr/local -maxdepth 4 -type d -path '*/targets/*/lib' 2>/dev/null || true)
+    if [ -n "$CUDA_LIB_DIRS" ]; then
+        CUDA_ROOT=$(dirname "$(dirname "$(dirname "$(echo "$CUDA_LIB_DIRS" | head -n1)")")")
+        echo "-- CUDA toolkit before trim: $(du -sh "$CUDA_ROOT" 2>/dev/null | cut -f1)"
+        for d in $CUDA_LIB_DIRS; do
+            find "$d" -maxdepth 1 -name '*_static.a' ! -name 'libcudart_static.a' -delete
+            rm -f "$d"/libcusolverMg.so*
+        done
+        rm -rf "$CUDA_ROOT"/nsight-compute-* "$CUDA_ROOT"/nsight-systems-* \
+               "$CUDA_ROOT"/libnvvp "$CUDA_ROOT"/doc "$CUDA_ROOT"/samples
+        echo "-- CUDA toolkit after trim:  $(du -sh "$CUDA_ROOT" 2>/dev/null | cut -f1)"
+    fi
+    # NB: never `rm -rf /tmp/*` here. Apptainer's default `mount tmp = yes`
+    # bind-mounts the HOST /tmp into %post, so that glob deletes the build
+    # machine's temp files -- on a shared runner, everyone's.
+    rm -rf /var/cache/dnf /var/cache/yum /usr/share/doc /usr/share/man /usr/share/info /root/.cache
+
+    # capture actual GCC version, build date and CUDA version
+    source /opt/rh/gcc-toolset-13/enable
+    GCC_VERSION="$(gcc -dumpfullversion 2>/dev/null || gcc -dumpversion || echo unknown)"
+    BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    CUDA_VERSION="$(nvcc --version | awk -F',| ' '/release/{print $6}')"
+    # inject into labels.json - %labels section
+    LBL=/.singularity.d/labels.json
+    TMP=$(mktemp)
+    jq --arg gv "$GCC_VERSION" --arg bd "$BUILD_DATE" --arg cv "$CUDA_VERSION" \
+    '.GCC=$gv | .BUILT_AT=$bd | .CUDA=$cv' \
+    "$LBL" > "$TMP" && mv "$TMP" "$LBL"
+
+    # GitLab and agentic tools
+    if [ "{{ENABLE_AGENT_TOOLS}}" == "1" ]; then
+        source /opt/conda/etc/profile.d/conda.sh
+        conda create -n agents python={{PY_VER}} -q -y > /dev/null
+        conda activate agents > /dev/null
+
+        conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
+        conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
+
+        python3 -m pip install fastmcp
+        conda install datasets debugpy gitpython -q -y > /dev/null
+        conda install -c conda-forge python-gitlab openai-agents -q -y > /dev/null
+
+        curl -fsSL https://rpm.nodesource.com/setup_current.x | bash
+        dnf install nodejs -y
+
+        # install coding agents
+        npm install -g @openai/codex@native
+        npm install -g @anthropic-ai/claude-code
+
+        conda clean -afy > /dev/null
+    fi
+
+%test
+    # Fails the build (unless -T) and can be re-run with `apptainer test`.
+    # Guards the trim above: a deleted archive the toolchain actually needs
+    # shows up here rather than half an hour into a CI compile.
+    set -e
+    source /opt/rh/gcc-toolset-13/enable
+    source /opt/conda/etc/profile.d/conda.sh
+    # If this is wrong the compile below fails in a way that looks like a broken
+    # image rather than a leaked variable, so say it out loud.
+    echo "GCC_ROOT ${GCC_ROOT:-<unset>}"
+    case "${GCC_ROOT:-}" in
+        ""|/opt/rh/gcc-toolset-13/root) ;;
+        *) echo "FATAL: GCC_ROOT points outside the image ($GCC_ROOT); the %environment guard did not apply" >&2; exit 1 ;;
+    esac
+    echo "gcc    $(gcc -dumpfullversion)"
+    echo "nvcc   $(nvcc --version | awk -F',| ' '/release/{print $6}')"
+    echo "cmake  $(cmake --version | head -n1 | awk '{print $3}')"
+    echo "conda  $(conda --version | awk '{print $2}')"
+    case "$(gcc -dumpversion)" in 13*) ;; *) echo "expected gcc 13" >&2; exit 1 ;; esac
+    for a in libcudart_static.a libculibos.a; do
+        find /usr/local/cuda-*/targets/*/lib -name "$a" | grep -q . || {
+            echo "FATAL: $a was pruned but nvcc links it implicitly" >&2; exit 1; }
+    done
+    # a real compile+link, so the trim is validated end to end.
+    # -p /tmp on purpose: %test inherits the caller's TMPDIR, which routinely
+    # names a host path that does not exist inside the container.
+    tmp=$(mktemp -d -p /tmp darts-nvcc.XXXXXX)
+    # nvcc writes its intermediates to TMPDIR; keep them inside the directory
+    # this test owns rather than wherever the caller's environment points.
+    export TMPDIR="$tmp"
+    printf '#include <cuda_runtime.h>\n#include <cstdio>\nint main(){int n=0;cudaGetDeviceCount(&n);printf("%%d\\n",n);return 0;}\n' > "$tmp/t.cu"
+    nvcc -Wno-deprecated-gpu-targets -allow-unsupported-compiler -o "$tmp/t" "$tmp/t.cu"
+    rm -rf "$tmp"
+    echo "builder image OK"
+
+%runscript
+    exec /bin/bash "$@"
+
+%help
+    open-DARTS CI builder image: CUDA devel toolkit, gcc-toolset-13, Miniconda.
+
+        apptainer exec --nv <image>.sif bash -lc "
+            source /opt/conda/etc/profile.d/conda.sh && conda activate <env> &&
+            ./helper_scripts/build_install_darts_gpu.sh -c -p --no-cudss -j 16"
+
+    To ship open-DARTS to users, build the runtime image instead:
+
+        .cicd/build-linux/build_runtime_image.sh
+
+    See docs/for_developers/ci_cd_gpu_images.md.

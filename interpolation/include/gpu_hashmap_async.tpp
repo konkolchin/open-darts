@@ -27,16 +27,22 @@ __host__ gpu_hash_map<vector_element_t, VECTOR_SIZE> *create_hashmap(int capacit
 
     gpu_hash_map<vector_element_t, VECTOR_SIZE> *hashmap;
 
-    cudaMalloc(&hashmap, sizeof(gpu_hash_map<vector_element_t, VECTOR_SIZE>));
+    CUDA_CHECK_RETURN(cudaMalloc(&hashmap, sizeof(gpu_hash_map<vector_element_t, VECTOR_SIZE>)));
 
-    cudaMalloc(&host_dummy.data, sizeof(key_vector<vector_element_t, VECTOR_SIZE>) * host_dummy.size);
-    cudaMemset(host_dummy.data, 0xff, sizeof(key_vector<vector_element_t, VECTOR_SIZE>) * host_dummy.size); ///< 0xff fills key with -1 (empty sentinel)
+    CUDA_CHECK_RETURN(cudaMalloc(&host_dummy.data, sizeof(key_vector<vector_element_t, VECTOR_SIZE>) * host_dummy.size));
+    CUDA_CHECK_RETURN(cudaMemset(host_dummy.data, 0xff, sizeof(key_vector<vector_element_t, VECTOR_SIZE>) * host_dummy.size)); ///< 0xff fills key with -1 (empty sentinel)
 
     cudaMemcpy(hashmap, &host_dummy, sizeof(gpu_hash_map<vector_element_t, VECTOR_SIZE>), cudaMemcpyHostToDevice);
 
     return hashmap;
 }
 
+/**
+ * @brief Move the entries of a map into a new one expand_factor times larger; the old map is freed.
+ * @param old_hashmap device map to grow
+ * @param expand_factor power-of-two growth factor
+ * @return device pointer to the new map; exits the process with a message if a device allocation fails
+ */
 template <typename vector_element_t, int VECTOR_SIZE>
 __host__ gpu_hash_map<vector_element_t, VECTOR_SIZE> *expand_hashmap(gpu_hash_map<vector_element_t, VECTOR_SIZE> *old_hashmap, int expand_factor)
 {
@@ -51,11 +57,13 @@ __host__ gpu_hash_map<vector_element_t, VECTOR_SIZE> *expand_hashmap(gpu_hash_ma
 
     gpu_hash_map<vector_element_t, VECTOR_SIZE> *new_hashmap;
 
-    cudaMalloc(&new_hashmap, sizeof(gpu_hash_map<vector_element_t, VECTOR_SIZE>));
+    // The map grows while a model runs: an allocation that fails (device memory taken by another process) must stop
+    // the run here, not leave a map that silently drops hypercubes.
+    CUDA_CHECK_RETURN(cudaMalloc(&new_hashmap, sizeof(gpu_hash_map<vector_element_t, VECTOR_SIZE>)));
 
-    cudaMalloc(&new_hashmap_h.data, sizeof(key_vector<vector_element_t, VECTOR_SIZE>) * new_hashmap_h.size);
+    CUDA_CHECK_RETURN(cudaMalloc(&new_hashmap_h.data, sizeof(key_vector<vector_element_t, VECTOR_SIZE>) * new_hashmap_h.size));
 
-    cudaMemset(new_hashmap_h.data, 0xff, sizeof(key_vector<vector_element_t, VECTOR_SIZE>) * new_hashmap_h.size);
+    CUDA_CHECK_RETURN(cudaMemset(new_hashmap_h.data, 0xff, sizeof(key_vector<vector_element_t, VECTOR_SIZE>) * new_hashmap_h.size));
 
     cudaMemcpy(new_hashmap, &new_hashmap_h, sizeof(gpu_hash_map<vector_element_t, VECTOR_SIZE>), cudaMemcpyHostToDevice);
 

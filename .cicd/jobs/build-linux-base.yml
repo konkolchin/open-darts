@@ -34,7 +34,7 @@
         - source /opt/conda/bin/activate
         - conda env remove -n ${CONDA_ENV} --yes || true
     needs:
-    - job: docker-image-builder
+    - job: docker-builder-image
       optional: true
     artifacts:
       paths:

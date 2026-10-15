@@ -243,6 +243,21 @@ class NonlinearSolverSpec:
 # ------------------------------------------------------------------ runtime status
 
 
+class RecoverableEvaluationError(RuntimeError):
+    """The current Newton trial state cannot be evaluated; cut the timestep.
+
+    Raise it from a property/flash evaluator (it propagates through the OBL
+    supporting-point generation back to the Newton driver) or from a spec
+    pre/post routine, when a failure belongs to the trial state rather than to
+    the model -- e.g. a flash that does not converge at a state reached by an
+    overshooting Newton update. The Newton driver then ends the attempt through
+    the ordinary failed-step path (engine rollback to the last accepted state,
+    timestep cut) and reports the message as ``status.divergence_reason``.
+    The OBL batch that raised it is not stored, so no failed point is cached.
+    Any other exception still aborts the run.
+    """
+
+
 class NonlinearStatus:
     """Per-timestep nonlinear solve status, replacing the C++ engine's
     ``n_newton_last_dt``/``n_linear_last_dt``/``newton_residual_last_dt``/
@@ -256,6 +271,9 @@ class NonlinearStatus:
         self.linear_solver_rc = 0
         self.n_linear_nonconverged = 0
         self.residual_history = []
+        # set by the divergence guard of the Newton driver when it abandons the
+        # timestep (see NewtonSpec.max_residual & co.); None otherwise
+        self.divergence_reason = None
 
     def reset(self):
         self.__init__()
@@ -271,6 +289,9 @@ class SolverStats:
         self.n_newton_wasted = 0
         self.n_linear_total = 0
         self.n_linear_wasted = 0
+        # timestep attempts abandoned by the divergence guard (a subset of
+        # n_timesteps_wasted)
+        self.n_divergence_aborts = 0
 
     def update(self, converged: bool, status: NonlinearStatus):
         if converged:
@@ -281,13 +302,33 @@ class SolverStats:
             self.n_timesteps_wasted += 1
             self.n_newton_wasted += status.n_newton
             self.n_linear_wasted += status.n_linear
+            if getattr(status, "divergence_reason", None):
+                self.n_divergence_aborts += 1
 
-    def print(self):
-        print(
+    def format(self) -> str:
+        """The one-line totals, as the C++ engine used to print them."""
+        return (
             f"----- TS = {self.n_timesteps_total:d}({self.n_timesteps_wasted:d}), "
             f"NI = {self.n_newton_total:d}({self.n_newton_wasted:d}), "
             f"LI = {self.n_linear_total:d}({self.n_linear_wasted:d}) -----"
         )
+
+    def print(self):
+        print(self.format())
+
+    def log(self):
+        """Write the totals to the darts output stream, at INFO level.
+
+        That is the stream ``redirect_darts_output()`` points at the run log and
+        the C++ engine prints its own lines on -- where :meth:`print` never
+        reached, writing to Python's stdout instead. ``DartsModel.run()`` calls
+        this one whatever ``verbose`` is, so a run log always carries the
+        totals, and :meth:`print` for the console copy. Silence it with
+        ``logging.set_logging_level(logging.LoggingLevel.WARNING)``.
+        """
+        from darts.engines import logging
+
+        logging.info(self.format())
 
 
 def write_to_log(message: str):
@@ -468,6 +509,8 @@ class NonlinearSolver:
             np.isfinite(status.newton_residual) and np.isfinite(status.well_residual)
         ):
             return False
+        if status.divergence_reason:
+            return False
         return not (
             status.linear_solver_rc != 0
             or status.newton_residual >= spec.tolerance
@@ -476,6 +519,11 @@ class NonlinearSolver:
 
     def _failure_message(self, dt: float) -> str:
         status = self.status
+        if status.divergence_reason:
+            return (
+                f"FAILED TO CONVERGE WITH DT = {dt:.3f} "
+                f"(divergence guard: {status.divergence_reason}) \n"
+            )
         if status.linear_solver_rc == 1:
             reason = "linear solver setup failed"
         elif status.linear_solver_rc == 2:

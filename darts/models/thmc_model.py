@@ -7,6 +7,7 @@ from darts.engines import (
     linear_solver_params,
     mech_operators,
     sim_params,
+    timer_node,
 )
 from darts.models.darts_model import DartsModel
 from darts.physics.base.property_container import PropertyContainer
@@ -40,7 +41,11 @@ class THMCModel(DartsModel):
         self.timer.node["initialization"].start()
         self.set_input_data()
         self.set_physics()
+
+        self.timer.node["initialization"].node["set_reservoir"] = timer_node()
+        self.timer.node["initialization"].node["set_reservoir"].start()
         self.set_reservoir()
+        self.timer.node["initialization"].node["set_reservoir"].stop()
         self.reservoir.P_VAR = self.physics.engine.P_VAR
         self.reservoir.U_VAR = self.physics.engine.U_VAR
         if hasattr(self, 'idata'):
@@ -59,7 +64,11 @@ class THMCModel(DartsModel):
         self.reservoir.eps_vol_ref[:] = self.physics.engine.eps_vol[:]
         self.physics.engine.t = 0.0
 
-        if self.discretizer_name == 'pm_discretizer':
+        # Contact mechanics is optional: a pm_discretizer model without fault contacts
+        # (no reservoir.contacts, hence no setup_contact_friction) has nothing to set up here
+        if self.discretizer_name == 'pm_discretizer' and getattr(
+            self.reservoir, 'contacts', None
+        ):
             self.physics.engine.contact_solver = (
                 contact_solver.RETURN_MAPPING
             )  # local_iterations # flux_from_previous_iteration # return_mapping
@@ -235,6 +244,7 @@ class THMCModel(DartsModel):
         return
 
     def init(self):
+        engine_n_vars = self.physics.engine.get_n_vars()
         if self.discretizer_name == 'pm_discretizer':
             self.reservoir.mech_operators = mech_operators()
             self.reservoir.mech_operators.init(
@@ -243,7 +253,7 @@ class THMCModel(DartsModel):
                 self.physics.engine.P_VAR,
                 self.physics.engine.Z_VAR,
                 self.physics.engine.U_VAR,
-                self.physics.engine.N_VARS,
+                engine_n_vars,
                 self.physics.engine.N_OPS,
                 self.physics.engine.NC,
                 self.physics.engine.ACC_OP,
@@ -279,10 +289,10 @@ class THMCModel(DartsModel):
             self.reservoir, 'contacts'
         ):
             for contact in self.reservoir.contacts:
-                contact.N_VARS = self.physics.engine.N_VARS
+                contact.N_VARS = engine_n_vars
                 contact.U_VAR = self.physics.engine.U_VAR
                 contact.P_VAR = self.physics.engine.P_VAR
-                contact.NT = self.physics.engine.N_VARS
+                contact.NT = engine_n_vars
                 contact.U_VAR_T = self.physics.engine.U_VAR
                 contact.P_VAR_T = self.physics.engine.P_VAR
                 contact.init_friction(self.reservoir.pm, self.reservoir.mesh)
@@ -355,8 +365,18 @@ class THMCModel(DartsModel):
         Function to get the needed performance data
         """
         perf_data = dict()
-        perf_data['solution'] = np.copy(self.physics.engine.X)
-        perf_data['variables'] = ['ux', 'uy', 'uz', 'p']
+        engine = self.physics.engine
+        perf_data['solution'] = np.copy(engine.X)
+        # names of the unknowns in engine order: [p, (z..), (T), ux, uy, uz] or [ux, uy, uz, p]
+        # get_n_vars() is the binding these engines expose; there is no N_VARS attribute
+        variables = ['z'] * engine.get_n_vars()
+        variables[engine.P_VAR] = 'p'
+        # T_VAR equals U_VAR in isothermal engines
+        t_var = getattr(engine, 'T_VAR', engine.U_VAR)
+        if t_var < engine.U_VAR and t_var != engine.P_VAR:
+            variables[t_var] = 'T'
+        variables[engine.U_VAR : engine.U_VAR + 3] = ['ux', 'uy', 'uz']
+        perf_data['variables'] = variables
         perf_data['reservoir blocks'] = self.reservoir.mesh.n_blocks
 
         if is_last_ts:
@@ -493,7 +513,8 @@ class THMCModel(DartsModel):
                     )
                     fail += 1
 
-            if not fail:
-                return 0
-            else:
-                return 1
+        # decide after all parameters are checked
+        if not fail:
+            return 0
+        else:
+            return 1

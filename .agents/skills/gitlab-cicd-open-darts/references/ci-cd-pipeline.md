@@ -38,6 +38,7 @@ pre_commit → build_images → build → test → deploy → ingest
 | `test-linux.yml` | Linux test suite |
 | `test-windows.yml` | Windows test suite |
 | `test-linux-gpu.yml` | GPU tests |
+| `testbench.yml` | `trigger-testbench`: the model testbench (open-darts/testbench) in this pipeline's GPU runtime image |
 | `valgrind-check.yml` | Valgrind memory leak detection |
 | `upload-wheels.yml` | Wheel upload to SMB/artifacts |
 | `deploy.yml` | PyPI, Zenodo, GitLab Pages, Apptainer deploy |
@@ -59,7 +60,9 @@ Jobs trigger based on these conditions:
 | `TEST_CUSTOM_BRANCH=1` | Python 3.11 build + test |
 | `UPLOAD_TEST_PYPI=1` | Upload to TestPyPI |
 | `DOCS_PAGES=1` | Build + deploy documentation |
-| `RUN_APPTAINER_DEPLOY=1` | Push Apptainer image to registry |
+| Push to `development` | Also builds the portable GPU runtime Apptainer image and publishes it (`darts-gpu:latest`, `:<sha12>`) |
+| `RUN_RUNTIME_IMAGE=1` | Build the GPU runtime image in portable (multi-architecture) mode without publishing |
+| `RUN_RUNTIME_IMAGE_DEPLOY=1` | On another protected branch: build and publish the runtime image as `darts-gpu:<sha12>` |
 
 ---
 
@@ -89,6 +92,8 @@ Same Python version matrix as Linux, builds with MSVC.
 | `test-linux-3.11` | Same with bos_solvers |
 | `valgrind-check` | Memory leak detection |
 | `test-linux-gpu` | GPU-specific tests |
+| `test-apptainer-runtime-gpu` | The same suite on tahiti inside the GPU runtime image |
+| `trigger-testbench` | With `RUN_TESTBENCH=1`: the model testbench in the runtime image, after `test-apptainer-runtime-gpu` (same stage, `needs`) |
 
 Test sequence in each job:
 1. `cd models && darts run_test_suite2.py LOG`
@@ -122,10 +127,18 @@ Triggered on `main` pushes or version tags:
 
 Triggered on version tags: archives source code and publishes DOI.
 
-### Apptainer Image
+### Apptainer Images
 
-Manual trigger with `RUN_APPTAINER_DEPLOY=1`: pushes Apptainer `.sif` image to
-GitLab Container Registry.
+Only the GPU **runtime** image is published, as `oras://$CI_REGISTRY_IMAGE/darts-gpu`
+(`deploy-apptainer-runtime-gpu-image`):
+
+- every `development` pipeline pushes `latest` and `<sha12>`. `latest` is only
+  moved while that commit is still the tip of `development`.
+- release tags push `X.Y.Z` and `<sha12>`.
+
+The **builder** image (`apptainer-builder-gpu-image`) is a CI tool and is never
+pushed to the registry. It stays on the tahiti runner's disk under
+`/data/open-darts-apptainer-images`. See `docs/for_developers/ci_cd_gpu_images.md`.
 
 ---
 
@@ -188,7 +201,10 @@ cd docs && sphinx-build -b html . public
 | `TEST_GPU` | Enable GPU tests |
 | `UPLOAD_TEST_PYPI` | Upload to TestPyPI |
 | `DOCS_PAGES` | Build and deploy documentation |
-| `RUN_APPTAINER_DEPLOY` | Deploy Apptainer image |
+| `RUN_RUNTIME_IMAGE` | Build the GPU runtime image in portable mode (no publish) |
+| `RUN_RUNTIME_IMAGE_DEPLOY` | Build and publish the GPU runtime image from a protected branch other than `development` |
+| `UPDATE_APPTAINER_IMAGE`, `UPDATE_RUNTIME_IMAGE` | Force a rebuild of the builder / runtime image despite a cache hit |
+| `RUN_TESTBENCH`, `TESTBENCH_*` | Trigger the model testbench and select its variants (`docs/for_developers/ci_cd_gpu_images.md`) |
 | `APPEND_VTUNE_MODEL` | Additional models for VTune profiling |
 | `SMBNAME`, `SMBLOGIN`, `SMBPASS` | SMB credentials for bos_solvers |
 | `PYPIUSER`, `PYPIPWD` | PyPI upload credentials |

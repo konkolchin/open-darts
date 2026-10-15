@@ -91,15 +91,19 @@ namespace dis
       }
     };
 
+    // compound assignment stores the merged result in *this; the merged type must equal
+    // this type, i.e. ap may only use variables this approximation already has
     template <VarName... OtherNames>
-    auto operator+=(const LinearApproximation<OtherNames...>& ap)
+    LinearApproximation<VarNames...>& operator+=(const LinearApproximation<OtherNames...>& ap)
     {
-      return operator+(*this, ap);
+      *this = *this + ap;
+      return *this;
     }
     template <VarName... OtherNames>
-    auto operator-=(const LinearApproximation<OtherNames...>& ap)
+    LinearApproximation<VarNames...>& operator-=(const LinearApproximation<OtherNames...>& ap)
     {
-      return operator-(*this, ap);
+      *this = *this - ap;
+      return *this;
     }
   };
 
@@ -189,6 +193,13 @@ namespace dis
     }
   }
 
+  // offset of the block of V within a block of LinearApproximation<Vs...>
+  template <VarName V, VarName... Vs>
+  constexpr int OffsetIn(TypeList<Vs...>)
+  {
+    return CalculateMapping<V, Vs...>();
+  }
+
   // merge stencils
   [[maybe_unused]] static inline void merge_stencils(const std::vector<index_t>& st1, const std::vector<index_t>& st2, std::vector<index_t>& st)
   {
@@ -241,19 +252,10 @@ namespace dis
     res.a = Matrix(ap1.a.M, res.n_block * res.stencil.size());
     res.rhs = Matrix(ap1.a.M, 1);
 
-    constexpr std::array<int, sizeof...(VarNames2)> mapping2 = { []() -> int
-    {
-      int idx = IndexOf<VarNames2, TypeList<VarNames1...>>::value;
-            if (idx != -1) {
-        // If the variable is found in the first list, calculate its mapping index accounting for the block size
-        return CalculateMapping<VarNames2, VarNames1...>();
-            }
-            else {
-        // If the variable is not found in the first list, append it at the end
-        return CalculateMapping<VarNames2, VarNames1..., VarNames2>();
-            }
-      }()...
-    };
+    // column offset of every variable of ap2 within a block of the result: the merged list starts with the
+    // variables of ap1, and those ap1 lacks follow in the order of ap2, so offsets are taken from that list
+    // (each variable ap1 lacks has its own slot, so several of them never share one offset)
+    constexpr std::array<int, sizeof...(VarNames2)> mapping2 = { OffsetIn<VarNames2>(MergedType{})... };
 
     constexpr index_t nb1 = ap1.n_block;
     constexpr index_t nb2 = ap2.n_block;

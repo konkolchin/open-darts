@@ -1037,9 +1037,15 @@ class Output:
                         (self.reservoir.mesh.n_blocks, dataset_width)
                     )[cell_id]
                 else:
-                    reshaped = np.asarray(self.physics.engine.X).reshape(
-                        (self.reservoir.mesh.n_blocks, self.physics.n_vars)
-                    )[cell_id]
+                    engine_state = np.asarray(self.physics.engine.X)
+                    engine_width = engine_state.size // self.reservoir.mesh.n_blocks
+                    reshaped = engine_state.reshape(
+                        (self.reservoir.mesh.n_blocks, engine_width)
+                    )
+                    if engine_width != dataset_width:
+                        flow_start = getattr(self.physics.engine, "P_VAR", 0)
+                        reshaped = reshaped[:, flow_start : flow_start + dataset_width]
+                    reshaped = reshaped[cell_id]
                 data_array = np.expand_dims(
                     reshaped, axis=0
                 )  # shape (1, n_cells, n_state)
@@ -1168,6 +1174,65 @@ class Output:
 
         return time, cell_id, X, var_names
 
+    def _property_itor_stride(self) -> int:
+        """Operator slots per cell in the property interpolator evaluated below.
+
+        ``self.n_ops`` sizes the RESERVOIR operator set, which is also what the
+        compositional physics builds its ``property_itor`` from -- but not the
+        chemistry physics, which sizes that interpolator by its own property
+        list (``n_property_itor_ops``). Striding by ``self.n_ops`` there reads
+        the wrong slots and returns numbers from unrelated operators. When
+        output-only property interpolators exist, ``set_phase_properties`` has
+        already set ``self.n_ops`` to match them.
+        """
+        if getattr(self.physics, 'output_property_itor', None):
+            return self.n_ops
+        return int(getattr(self.physics, 'n_property_itor_ops', 0) or self.n_ops)
+
+    def _secondary_property_indices(self, secondary_props: list) -> dict:
+        """Map each secondary property name onto its slot in the operator values.
+
+        Resolved against the property OPERATORS that will actually be evaluated,
+        not against ``physics.property_containers``. An operator's ``props_idx``
+        is built from whatever container it was handed, and the chemistry physics
+        (:class:`~darts.physics.chemistry.physics.ElementBasedReactiveFlow`) hands
+        its property operators a SEPARATE ``output_property_containers[region]``
+        -- so porosity, mineral saturation ratios and reaction rates never appear
+        on ``property_containers`` and could not be requested at all. Falls back
+        to the containers for a physics that exposes no usable operators (for
+        instance when they are wrapped for parallel evaluation, in which case
+        ``set_phase_properties`` has already mirrored the names onto them).
+
+        :raises KeyError: if a name is produced by no region's operators
+        """
+        operators = (
+            self.physics.output_property_operators
+            if getattr(self.physics, 'output_property_itor', None)
+            else getattr(self.physics, 'property_operators', None)
+        )
+        sources = [
+            op.props_idx
+            for op in (operators or {}).values()
+            if getattr(op, 'props_idx', None)
+        ]
+        if not sources:
+            sources = [
+                {name: j for j, name in enumerate(container.output_props)}
+                for container in self.physics.property_containers.values()
+            ]
+
+        indices = {}
+        for prop in secondary_props:
+            for source in sources:
+                if prop in source:
+                    indices[prop] = source[prop]
+                    break
+            else:
+                raise KeyError(
+                    f"Secondary property '{prop}' not found in any property container."
+                )
+        return indices
+
     def output_properties(
         self,
         sol_filepath: str = None,
@@ -1253,18 +1318,7 @@ class Output:
 
         # List of secondary properties
         secondary_props = [prop for prop in output_properties if prop not in var_names]
-        secondary_prop_idxs = {}
-        for prop in secondary_props:
-            for container in self.physics.property_containers.values():
-                if prop in container.output_props:
-                    secondary_prop_idxs[prop] = list(
-                        container.output_props.keys()
-                    ).index(prop)
-                    break
-            else:
-                raise KeyError(
-                    f"Secondary property '{prop}' not found in any property container."
-                )
+        secondary_prop_idxs = self._secondary_property_indices(secondary_props)
 
         # define property array dictionary
         property_array = {
@@ -1294,9 +1348,10 @@ class Output:
                         np.stack([X[j::n_vars] for j in range(n_vars)]).T.flatten()
                     )
 
-                values = value_vector(np.zeros(self.n_ops * nb))
+                n_prop_ops = self._property_itor_stride()
+                values = value_vector(np.zeros(n_prop_ops * nb))
                 values_numpy = np.array(values, copy=False)
-                dvalues = value_vector(np.zeros(self.n_ops * nb * n_vars))
+                dvalues = value_vector(np.zeros(n_prop_ops * nb * n_vars))
 
                 # Prefer the output-only property interpolators (built by
                 # set_phase_properties/filter_phase_props) when they exist.
@@ -1306,13 +1361,15 @@ class Output:
                     else self.physics.property_itor
                 )
                 for region, prop_itor in prop_itor_dict.items():
-                    block_idx = np.where(self.op_num == region)[0].astype(np.int32)
+                    # op_num also contains well blocks, while the state and output
+                    # buffers passed here contain reservoir blocks only.
+                    block_idx = np.where(self.op_num[:nb] == region)[0].astype(np.int32)
                     prop_itor.evaluate_with_derivatives(
                         state, index_vector(block_idx), values, dvalues
                     )
 
                     for prop_name, prop_idx in secondary_prop_idxs.items():
-                        temp = values_numpy[prop_idx :: self.n_ops]
+                        temp = values_numpy[prop_idx::n_prop_ops]
                         property_array[prop_name][k][block_idx] = temp[block_idx]
 
         return timesteps, property_array
@@ -1951,18 +2008,7 @@ class Output:
 
         # List of secondary properties
         secondary_props = [prop for prop in output_properties if prop not in var_names]
-        secondary_prop_idxs = {}
-        for prop in secondary_props:
-            for container in self.physics.property_containers.values():
-                if prop in container.output_props:
-                    secondary_prop_idxs[prop] = list(
-                        container.output_props.keys()
-                    ).index(prop)
-                    break
-            else:
-                raise KeyError(
-                    f"Secondary property '{prop}' not found in any property container."
-                )
+        secondary_prop_idxs = self._secondary_property_indices(secondary_props)
 
         # Define property array dictionary
         property_array = {
@@ -1979,9 +2025,10 @@ class Output:
                 np.stack([X[j::n_vars] for j in range(n_vars)]).T.flatten()
             )
 
-            values = value_vector(np.zeros(self.n_ops * nb))
+            n_prop_ops = self._property_itor_stride()
+            values = value_vector(np.zeros(n_prop_ops * nb))
             values_numpy = np.array(values, copy=False)
-            dvalues = value_vector(np.zeros(self.n_ops * nb * n_vars))
+            dvalues = value_vector(np.zeros(n_prop_ops * nb * n_vars))
 
             # Prefer the output-only property interpolators (built by
             # set_phase_properties/filter_phase_props) when they exist.
@@ -1997,7 +2044,7 @@ class Output:
                 )
 
                 for prop_name, prop_idx in secondary_prop_idxs.items():
-                    temp = values_numpy[prop_idx :: self.n_ops]
+                    temp = values_numpy[prop_idx::n_prop_ops]
                     property_array[prop_name][0][block_idx] = temp[block_idx]
 
         return time, property_array
@@ -2144,23 +2191,38 @@ class Output:
         for well in self.reservoir.wells:
             res_cell_idxs = [perf[1] for perf in well.perforations]
 
-            # Find indices of perforations in the connection list (those connections
-            # which 1. block_m is in the desired well and 2. block_p is in res_cell_idxs)
+            # Use the standard well-segment range first.
             mask = np.logical_and(
                 np.isin(block_p, res_cell_idxs),
                 np.logical_and(
-                    block_m >= well.well_head_idx, block_m <= well.well_bottom_idx
+                    block_m >= well.well_head_idx,
+                    block_m <= well.well_bottom_idx,
                 ),
             )
+            conn_idxs = np.flatnonzero(mask)
 
-            conn_idxs = np.nonzero(mask)
-            well_perf_conn_idxs[well.name] = conn_idxs[0]
-            assert well_perf_conn_idxs[well.name].size == len(
-                well.perforations
-            ) and np.all(
-                block_m[well_perf_conn_idxs[well.name]]
-                > self.reservoir.mesh.n_res_blocks
+            # MPFA mechanics wells can leave well_bottom_idx undefined
+            # and store both connection directions. For those simple EPM wells,
+            # each perforation connects directly from well_body_idx.
+            standard_lookup_ok = conn_idxs.size == len(well.perforations) and np.all(
+                block_m[conn_idxs] >= self.reservoir.mesh.n_res_blocks
             )
+            if not standard_lookup_ok:
+                fallback_conn_idxs = []
+                for perf in well.perforations:
+                    matches = np.flatnonzero(
+                        (block_m == well.well_body_idx) & (block_p == perf[1])
+                    )
+                    if matches.size != 1:
+                        raise RuntimeError(
+                            f"Expected one perforation connection for well "
+                            f"{well.name!r} and reservoir cell {perf[1]}, "
+                            f"found {matches.size}"
+                        )
+                    fallback_conn_idxs.append(int(matches[0]))
+                conn_idxs = np.asarray(fallback_conn_idxs, dtype=np.intp)
+
+            well_perf_conn_idxs[well.name] = conn_idxs
 
             # Find idx of well_head-well_body connection in the connection list
             wh_conn_idx = np.where(
@@ -2452,7 +2514,12 @@ class Output:
             physics, "n_well_ctrl_itor_ops", physics.well_ctrl_operators.n_ops
         )
         n_reservoir_ops = physics.reservoir_operators[0].n_ops
+        # Mechanics engines store displacement unknowns in addition to the
+        # flow variables consumed by the property interpolators. Use the
+        # engine width to identify that stored layout, but keep n_vars as the
+        # flow-state width used below for interpolation.
         n_vars = physics.n_vars
+        engine_n_vars = physics.engine.get_n_vars()
         # The reservoir / well-control interpolators consume the full OBL state
         # [primary | history] (n_state axes), but the well H5 stores only the primary
         # Newton state (n_vars-wide). Pad the missing history columns with each field's
@@ -2471,6 +2538,18 @@ class Output:
 
         states_m = h5_well_data["dynamic"]["X"][time_idx, cell_m]
         states_p = h5_well_data["dynamic"]["X"][time_idx, cell_p]
+        if states_m.shape[-1] == engine_n_vars and engine_n_vars != n_vars:
+            # Mechanics engines also store displacement unknowns. Select the
+            # contiguous flow state consumed by the property interpolators.
+            flow_start = getattr(physics.engine, "P_VAR", 0)
+            flow_vars = slice(flow_start, flow_start + n_vars)
+            states_m = states_m[..., flow_vars]
+            states_p = states_p[..., flow_vars]
+        elif states_m.shape[-1] != n_vars:
+            raise ValueError(
+                f'Well-state width {states_m.shape[-1]} matches neither the '
+                f'engine width {engine_n_vars} nor flow width {n_vars}'
+            )
 
         # State clipping to the OBL window has been removed — adaptive interpolators
         # cache cells on demand wherever the solver lands.

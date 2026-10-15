@@ -20,14 +20,61 @@
 
 #include <fstream>
 #include <iostream>
+#include <sstream>
 #include <stdexcept>
 #include <stdio.h>
 #include <string.h>
 #include <string>
+#include <vector>
 
 #include "csr_matrix.hpp"
 
 #include "test_common.hpp"
+
+namespace
+{
+  /** Splits \p line into whitespace separated fields, dropping a trailing carriage
+      return so that a CRLF file and an LF file yield the same fields.
+
+      @param line - The line to split.
+
+      @return The fields of the line, in order.
+  */
+  std::vector<std::string> split_fields(const std::string &line)
+  {
+    std::string line_without_cr(line);
+    while (!line_without_cr.empty() && line_without_cr.back() == '\r')
+      line_without_cr.pop_back();
+
+    std::vector<std::string> fields;
+    std::istringstream line_stream(line_without_cr);
+    std::string field;
+    while (line_stream >> field)
+      fields.push_back(field);
+
+    return fields;
+  }
+
+  /** Parses \p field as a floating point number, requiring the WHOLE field to be
+      consumed so that "1.0e+00" is a number while "// ROW" and "0abc" are not.
+
+      @param field - The field to parse.
+      @param value - Set to the parsed value when the field is a number.
+
+      @return (true) the field is a number and \p value was set, (false) it is not.
+  */
+  bool parse_number(const std::string &field, opendarts::config::mat_float &value)
+  {
+    std::istringstream field_stream(field);
+    opendarts::config::mat_float parsed_value;
+    field_stream >> parsed_value;
+    if (field_stream.fail() || !field_stream.eof()) // not a number, or only partly one
+      return false;
+
+    value = parsed_value;
+    return true;
+  }
+} // namespace
 
 bool opendarts::linear_solvers::testing::compare_files(std::string filename_1, std::string filename_2)
 {
@@ -101,6 +148,82 @@ bool opendarts::linear_solvers::testing::compare_files(std::string filename_1, s
 
   return true;
 }
+
+bool opendarts::linear_solvers::testing::compare_matrix_files(std::string filename_1, std::string filename_2)
+{
+  std::ifstream file_1, file_2; // the streams for the files so that we can read them
+
+  file_1.open(filename_1.c_str(), std::ios::binary);
+  file_2.open(filename_2.c_str(), std::ios::binary);
+
+  // Check if files can be openned
+  if (!file_1)
+  {
+    std::cout << "Couldn't open the file:  " << filename_1 << std::endl;
+    return false;
+  }
+
+  if (!file_2)
+  {
+    std::cout << "Couldn't open the file: " << filename_2 << std::endl;
+    return false;
+  }
+
+  // Compare the two files line by line, and each line field by field
+  std::string line_1, line_2;
+  int line_idx = 0;
+  while (true)
+  {
+    const bool got_line_1 = static_cast<bool>(std::getline(file_1, line_1));
+    const bool got_line_2 = static_cast<bool>(std::getline(file_2, line_2));
+
+    if (!got_line_1 && !got_line_2)
+      break; // both files ended together, they match
+
+    if (got_line_1 != got_line_2)
+    {
+      std::cout << "Different number of lines in files!" << std::endl;
+      std::cout << (got_line_1 ? filename_2 : filename_1) << " ended at line " << line_idx << std::endl;
+      return false;
+    }
+
+    line_idx++; // update the line number
+
+    const std::vector<std::string> fields_1 = split_fields(line_1);
+    const std::vector<std::string> fields_2 = split_fields(line_2);
+
+    if (fields_1.size() != fields_2.size())
+    {
+      std::cout << "Line " << line_idx << ": different number of fields ("
+                << fields_1.size() << " vs " << fields_2.size() << ")" << std::endl;
+      std::cout << "   file_1:  " << line_1 << std::endl;
+      std::cout << "   file_2:  " << line_2 << std::endl;
+      return false;
+    }
+
+    for (std::size_t field_idx = 0; field_idx < fields_1.size(); field_idx++)
+    {
+      opendarts::config::mat_float value_1, value_2;
+      const bool is_number_1 = parse_number(fields_1[field_idx], value_1);
+      const bool is_number_2 = parse_number(fields_2[field_idx], value_2);
+
+      // Numbers are compared by value, everything else (comments, headers) as text
+      const bool fields_match = (is_number_1 && is_number_2) ? (value_1 == value_2)
+                                                            : (fields_1[field_idx] == fields_2[field_idx]);
+
+      if (!fields_match)
+      {
+        std::cout << "Line " << line_idx << ", field " << (field_idx + 1) << ": not equal" << std::endl;
+        std::cout << "   file_1:  " << fields_1[field_idx] << std::endl;
+        std::cout << "   file_2:  " << fields_2[field_idx] << std::endl;
+        return false;
+      }
+    }
+  }
+
+  return true;
+}
+
 
 template <uint8_t N_BLOCK_SIZE>
 void opendarts::linear_solvers::testing::generate_tridiagonal_matrix(

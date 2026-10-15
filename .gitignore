@@ -8,6 +8,8 @@ darts/*.dll
 darts/linear_solvers/*.so*
 darts/linear_solvers/*.pyd
 darts/linear_solvers/*.dll
+darts/physics/geomechanics/nucleus_of_strain/*.so*
+darts/physics/geomechanics/nucleus_of_strain/*.pyd
 dist/
 sdist/
 eggs/
@@ -21,11 +23,8 @@ thirdparty/install
 
 # cache
 docs/_build
-**/.cache
-**/__pycache__/
-darts/__pycache__/
-models/__pycache__/
 **/.cache/
+**/__pycache__/
 *.fastcache
 
 # building info
@@ -72,3 +71,9 @@ results_*/**
 
 # Generated text output
 *.txt
+
+# Container images and the staging context build_runtime_image.sh creates
+*.sif
+.cicd/build-linux/.context/
+.wheelbuild-env/
+.wheelbuild-pkgs/

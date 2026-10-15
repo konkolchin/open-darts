@@ -13,8 +13,8 @@ void pybind_operator_set_interpolator_super_part4(py::module &m);
 void pybind_operator_set_interpolator_super(py::module &m)
 {
   // Call all split parts
-  // Part 1: Thermal single-phase / two-phase plus the two-phase hysteresis specialization
-  // (A=4,B=10), (A=6,B=17), (A=6,B=11)
+  // Part 1: Thermal single-phase / two-phase plus the history-augmented (OBL history axes) specializations
+  // (A=4,B=10), (A=6,B=17), (A=6,B=11), (A=8,B=16), (A=8,B=8)
   pybind_operator_set_interpolator_super_part1(m);
 
   // Part 2: Thermal three-phase and four-phase (A=8,B=24), (A=10,B=31)

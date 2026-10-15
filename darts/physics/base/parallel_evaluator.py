@@ -37,6 +37,7 @@ import warnings
 import numpy as np
 
 from darts.engines import operator_set_evaluator_iface, value_vector
+from darts.physics.base.operator_evaluator import OperatorsBase
 
 # ── Module-level worker state and functions (must be picklable) ────────────
 
@@ -223,31 +224,37 @@ def _worker_init_multi(factories: dict, silence_workers: bool = True):
 def _worker_evaluate_chunk_multi(key, coords_flat, n_dims, n_ops):
     """
     Evaluate a contiguous chunk of points in this worker, using the evaluator
-    registered under ``key``.
+    registered under ``key``. An evaluator exception propagates: the pool
+    re-raises it in the parent, which then evaluates the batch serially, so the
+    exception reaches the caller as it does without the pool (a
+    ``RecoverableEvaluationError`` cuts the timestep, nothing is cached).
+
+    Operator sets (:class:`OperatorsBase`) evaluate the chunk with their ``evaluate_batch``, vectorised where they
+    and their property container support it; other evaluators evaluate it point by point.
 
     :param key: hashable key identifying which evaluator to use
+    :type key: collections.abc.Hashable
     :param coords_flat: 1-D numpy array of shape [n_pts * n_dims]
+    :type coords_flat: np.ndarray
     :param n_dims: number of dimensions per point
+    :type n_dims: int
     :param n_ops: number of operators per point
+    :type n_ops: int
     :return: 1-D numpy array of shape [n_pts * n_ops]
+    :rtype: np.ndarray
     """
     global _worker_evaluators
     evaluator = _worker_evaluators[key]
     n_pts = len(coords_flat) // n_dims
     results = np.empty(n_pts * n_ops, dtype=np.float64)
 
+    if isinstance(evaluator, OperatorsBase):
+        evaluator.evaluate_batch(coords_flat, n_pts, results, n_ops)
+        return results
     for i in range(n_pts):
         sv = value_vector(coords_flat[i * n_dims : (i + 1) * n_dims].copy())
         vv = value_vector(np.zeros(n_ops))
-        try:
-            evaluator.evaluate(sv, vv)
-        except Exception as e:
-            warnings.warn(
-                f"Worker evaluation failed for key {key!r}, point {i}: {e}",
-                stacklevel=2,
-            )
-            vv_np = np.asarray(vv)
-            vv_np[:] = np.nan
+        evaluator.evaluate(sv, vv)
         results[i * n_ops : (i + 1) * n_ops] = np.asarray(vv)
     return results
 
@@ -493,26 +500,27 @@ class SharedEvaluatorPool:
     ) -> bool:
         """
         Dispatch a batch under ``key`` to the worker pool. Splits the batch into
-        roughly equal chunks (one per worker), gathers results back into
+        up to 8 contiguous chunks per worker, gathers results back into
         ``values_np``. Returns ``True`` on success, ``False`` if the pool raised
         and the caller should fall back to serial evaluation.
         """
         if n_points == 0:
             return True
 
-        chunk_size = (n_points + self.n_workers - 1) // self.n_workers
+        # Chunks are handed out one at a time (chunksize=1), so a worker that is done
+        # takes the next one instead of idling while the slowest worker finishes.
+        n_chunks = 8 * self.n_workers
+        chunk_size = (n_points + n_chunks - 1) // n_chunks
         chunks = []
-        for w in range(self.n_workers):
-            start = w * chunk_size
+        for start in range(0, n_points, chunk_size):
             end = min(start + chunk_size, n_points)
-            if start >= n_points:
-                break
             chunks.append(states_np[start * n_dims : end * n_dims].copy())
 
         try:
             results = self._pool.starmap(
                 _worker_evaluate_chunk_multi,
                 [(key, chunk, n_dims, n_ops) for chunk in chunks],
+                chunksize=1,
             )
         except Exception as e:
             warnings.warn(
@@ -663,7 +671,7 @@ class ParallelEvaluator(operator_set_evaluator_iface):
         Parallel batch evaluation via the (owned or shared) multiprocessing pool.
 
         Falls back to serial evaluation when (a) the batch is too small to amortize
-        pool overhead (``n_points <= n_workers``) or (b) the pool dispatch fails.
+        pool overhead (``n_points <= 2``) or (b) the pool dispatch fails.
 
         :param states: Flat array of coordinates [n_points * n_dims]
         :param n_points: Number of points to evaluate
@@ -678,8 +686,10 @@ class ParallelEvaluator(operator_set_evaluator_iface):
         values_np = np.asarray(values)
         n_dims = len(states_np) // n_points
 
-        # For small batches, skip pool overhead
-        if n_points <= self._n_workers:
+        # Only one or two points stay in this process: for the expensive evaluators
+        # this wrapper is meant for, a pool round trip costs less than a few more
+        # points evaluated one after another, even with fewer points than workers.
+        if n_points <= 2:
             return self._serial_evaluate_batch(
                 states_np, n_points, values_np, n_dims, n_ops
             )
@@ -694,7 +704,26 @@ class ParallelEvaluator(operator_set_evaluator_iface):
         return 0
 
     def _serial_evaluate_batch(self, states_np, n_points, values_np, n_dims, n_ops):
-        """Serial fallback using the local evaluator."""
+        """
+        Serial fallback using the local evaluator (its vectorised batch path if it is an operator set).
+
+        :param states_np: flat coordinates [n_points * n_dims]
+        :type states_np: np.ndarray
+        :param n_points: number of points
+        :type n_points: int
+        :param values_np: flat output [n_points * n_ops], written in place
+        :type values_np: np.ndarray
+        :param n_dims: coordinates per point
+        :type n_dims: int
+        :param n_ops: operators per point
+        :type n_ops: int
+        :returns: 0
+        :rtype: int
+        """
+        if isinstance(self._serial_evaluator, OperatorsBase):
+            return self._serial_evaluator.evaluate_batch(
+                states_np, n_points, values_np, n_ops
+            )
         for i in range(n_points):
             sv = value_vector(states_np[i * n_dims : (i + 1) * n_dims].copy())
             vv = value_vector(np.zeros(n_ops))

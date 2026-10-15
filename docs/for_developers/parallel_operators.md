@@ -12,7 +12,10 @@ involved; they are configured separately and should be understood together.
 The two are orthogonal: the C++ layer accelerates interpolation arithmetic that is
 already pure C++; the Python layer accelerates supporting-point generation, which
 calls back into Python physics and therefore cannot run under OpenMP threads (GIL,
-non-thread-safe flash solvers).
+non-thread-safe flash solvers). Independently of both, a property container can
+evaluate the missing points of a batch with numpy arrays instead of one by one
+(section 7); this needs no configuration and also applies inside the
+`ParallelEvaluator` workers.
 
 ## 1. C++ interpolator — three-phase adaptive update
 
@@ -59,9 +62,10 @@ serial C++ default, so existing evaluators keep working unchanged. `OperatorsBas
 also provides a serial Python `evaluate_batch`.
 
 `evaluate()` (single point) always uses a local serial evaluator; the pool is used
-only for batched supporting-point materialisation. Small batches
-(`n_points <= n_workers`) skip the pool, and any pool error falls back to serial
-evaluation with a warning rather than aborting the run.
+only for batched supporting-point materialisation. Batches of one or two points
+skip the pool; larger ones are split into up to 8 chunks per worker, handed out one
+at a time. Any pool error falls back to serial evaluation with a warning rather than
+aborting the run.
 
 ## 3. Using it in a model
 
@@ -76,8 +80,9 @@ m.init(itor_type='multilinear', platform='cpu',
 export OMP_NUM_THREADS=8     # C++ interpolation threads
 ```
 
-`parallel_evaluation=True` wraps each `reservoir_operators[region]` with a
-`ParallelEvaluator`. The evaluator for each worker is produced by a *factory* —
+`parallel_evaluation=True` wraps every operator set (`reservoir_operators[region]`,
+`property_operators[region]`, `well_operators`, `well_ctrl_operators`, `thermal_var_operator`;
+`PhysicsBase._parallel_wrap_targets`) with a `ParallelEvaluator`, all backed by one shared pool. The evaluator for each worker is produced by a *factory* —
 and that factory is **derived automatically from the model**, with no per-model
 boilerplate.
 
@@ -150,7 +155,72 @@ functions are likewise module-level.
   `get_evaluator_factory` with a lighter factory in that case.
 * `OMP_NUM_THREADS` and `n_workers` are independent. Over-subscription thrashes the
   CPU; a reasonable starting point is `n_workers × OMP_NUM_THREADS ≲ physical cores`.
-* NaN supporting points are warned about but still cached; a failed flash silently
-  degrades accuracy rather than stopping the run.
-* Only `reservoir_operators` are wrapped — property and well operators keep the
-  serial path.
+* An evaluator exception in a worker makes the pool fall back to serial evaluation
+  of the batch, so it reaches the caller as in a run without the pool (a
+  `RecoverableEvaluationError` cuts the timestep). NaN values that an evaluator
+  returns are cached like any other.
+* Which worker evaluates a point changes from run to run, so an evaluator that keeps
+  state between points (a warm-started flash) can differ within its tolerance.
+* Batches of one or two points stay on the serial path (not worth a pool round trip).
+
+## 7. Vectorised supporting-point evaluation (property-container batch protocol)
+
+`OperatorsBase.evaluate_batch(states, n_points, values, n_ops)` is what the adaptive
+interpolators call with all missing supporting points of one interpolation. By
+default it evaluates the points one by one with `evaluate()`. `ReservoirOperators`,
+`WellOperators` and `WellCtrlOperators` also have a vectorised assembly: when their
+property container implements the optional batch protocol, they evaluate the
+properties of all points in one call and build every operator with numpy arrays,
+term by term and in the same order as `evaluate()`. Points the vectorised path does
+not cover take the per-point loop in the same call.
+
+A container opts in by implementing `PropertyContainer.evaluate_batch(states)`; the
+default returns `None` (no batch support):
+
+```python
+import numpy as np
+from darts.physics.base.property_container import PropertyBatch, PropertyContainer
+
+
+class MyProperties(PropertyContainer):
+    def evaluate_batch(self, states):
+        b = PropertyBatch(len(states), self)  # zero arrays, point index first
+        p = states[:, 0]
+        ...  # fill b.present (n, nph), b.x (n, np_fl, nc_fl), b.dens, b.dens_m, b.sat,
+        ...  # b.mu, b.kr, b.pc, b.mass_source, b.temperature, b.rock_compr
+        b.evaluated = ...  # optional: False for states left to evaluate()
+        return b
+```
+
+Rules for an implementation:
+
+* For every point it marks as evaluated, each array holds what the container
+  attribute of the same name holds after `evaluate()` of that state, including the
+  zeros of absent phases; `rock_compr` is `rock_compr_ev.evaluate(p)`.
+* Repeating the arithmetic of `evaluate()` operation by operation makes the operator
+  values bitwise identical to the scalar path, so simulation results do not change.
+  Write Python `max(a, b)` as `np.where(b > a, b, a)` (it keeps `a` on ties) and add
+  short sums term by term from `0.0`, which is the order `np.sum` uses for fewer
+  than 8 values. numpy array versions of `exp`, `log` or `**` with a non-integer
+  exponent may round differently from the scalar calls; compare such containers
+  with a tolerance, or keep those parts in `evaluate()`.
+* Return `None` whenever the batch cannot reproduce `evaluate()`, for example an
+  evaluator without an array form or history variables (`n_history > 0`).
+* A subclass that changes `evaluate()` must also override `evaluate_batch()`;
+  until it does, the operator sets ignore the batch form it inherits.
+
+The operator sets keep the per-point loop for thermal physics; with 8 or more
+components or phases (`np.sum` then no longer adds sequentially); for states that
+`apply_extrapolation()` extrapolates; when the container's `evaluate` is replaced on
+the instance or overridden in a subclass of the class that defines its
+`evaluate_batch`; and when an operator-set subclass or instance overrides a method
+the vectorised assembly repeats (`evaluate`, `apply_extrapolation`, and
+`_fill_rate_ctrl_ops` for the well controls). They call
+`diffusion_ev[phase].evaluate()` once per batch and
+`permporo_mult_ev.evaluate(phi_f)` once per distinct `phi_f`.
+
+Only points that reach `evaluate_batch` are vectorised: a point an interpolator
+generates through `evaluate()` is evaluated alone. `tests/test_batch_operators.py`
+shows a small batch-capable container and the bitwise checks every implementation
+should have, over states that cover all its branches. The testbench black-oil
+container (`tbkit.props.BlackOilTablesProperties`) is a complete implementation.

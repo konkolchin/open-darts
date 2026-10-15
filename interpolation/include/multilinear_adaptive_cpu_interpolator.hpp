@@ -198,6 +198,13 @@ protected:
    void materialize_missing_cache(const std::vector<key_t> &missing_hc);
 
    /**
+    * @brief Evaluate supporting points with one evaluate_batch() call and store them in point_data.
+    *
+    * @param point_keys  Distinct multi-indices of points that are not in point_data yet
+    */
+   void evaluate_points(const std::vector<key_t> &point_keys);
+
+   /**
     * @brief Evict least-recently-used hypercubes down to ~0.9*hypercube_cap when the
     *        cache exceeds hypercube_cap. No-op when hypercube_cap == 0. Never evicts
     *        entries used in the current batch (eval_index). Erases only derived data.

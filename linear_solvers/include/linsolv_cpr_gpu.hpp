@@ -141,7 +141,7 @@ namespace opendarts
        *    2. r_m = B - A^T X           (transposed block SpMV)
        *    3. r_p = C^T r_m             (pressure-slot extraction)
        *    4. y   = (P^T)^{-1} r_p      (second AMGX instance on P^T)
-       *    5. X  += W^T (D_m y)         (weights + sign mults on the
+       *    5. X  += W^T (D_m y)         (weights + row scales on the
        *                                  PROLONGATION side -- exact transpose
        *                                  of the forward weighted reduction)
        *  Device pointers, like solve(). The P^T chain (transpose value map,
@@ -163,6 +163,28 @@ namespace opendarts
       int p_solver_setup_gpu = 0;
       int p_solver_solve_gpu = 0;
       int p_solver_requires_diag_first = 0;
+
+      /** Pressure-row scaling handed to AMG. 0 (default) = sign only: flip
+       *  rows whose pressure diagonal came out negative, leaving the natural
+       *  row scale of the discretisation intact. 1 = divide each row by its
+       *  diagonal.
+       *
+       *  Dividing by the diagonal is NOT a free improvement. A_p is close to
+       *  symmetric for a TPFA pressure operator, and row scaling makes
+       *  A_ij/d_i differ from A_ji/d_j by the neighbour ratio d_j/d_i. Where
+       *  the coefficient field is rough between adjacent cells -- SPE10 being
+       *  the extreme case -- that ratio is orders of magnitude and classical
+       *  AMG's coarsening/interpolation degrades badly (measured: SPE10 GPU
+       *  1019 -> 4522 linear iterations, 16 s -> 48 s).
+       *
+       *  It is the right thing only when something upstream has already given
+       *  each row an ARBITRARY scale, which the diagonal then divides back
+       *  out. Block-Schur condensation of a cell-local equation does exactly
+       *  that: it changes the True-IMPES reference equation, and the two
+       *  operators are the same operator up to a per-row factor. Hence
+       *  make_gpu_schur_elim_chain turns this on for its own CPR instance and
+       *  nothing else does. */
+      int normalize_pressure_rows = 0;
 
     private:
       /// (Re)builds the transposed pressure chain after a setup(): gathers

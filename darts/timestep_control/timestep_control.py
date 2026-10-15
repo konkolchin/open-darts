@@ -31,6 +31,9 @@ class TimestepControl:
         "dt_mult",
         "dt_max",
         "runtime",
+        "regrowth_hold_steps",
+        "regrowth_factor",
+        "regrowth_cap",
     )
 
     def __init__(self, n_vars=0):
@@ -53,6 +56,21 @@ class TimestepControl:
         self.runtime = (
             1000.0  # total runtime [days]; read by run() when days is not given
         )
+
+        # Regrowth limiter after a FAILED timestep (off by default). The plain
+        # controller retries at dt/dt_mult and, once that is accepted, regrows by
+        # dt_mult straight back into the size that just failed -- a fail/accept
+        # alternation where every failed attempt costs a full nonlinear solve.
+        # With regrowth_hold_steps > 0 the next `regrowth_hold_steps` accepted
+        # steps stay below regrowth_cap * dt_failed and grow by at most
+        # regrowth_factor per accepted step. dt_max itself is never modified:
+        # DartsModel.run() takes the effective bound from effective_dt_max().
+        self.regrowth_hold_steps = 0
+        self.regrowth_factor = 1.25
+        self.regrowth_cap = 0.75
+        self._hold_left = 0  # accepted steps still under the limiter
+        self._failed_dt = 0.0  # dt of the last failed attempt
+        self._ref_dt = 0.0  # growth reference since that failure (see notify_result)
 
         # Per-timestep run history (not configuration -- excluded from _FIELDS /
         # to_dict() / validate() / print()). Appended once per accepted timestep by
@@ -80,6 +98,35 @@ class TimestepControl:
         grown[: eta.size] = eta
         self.eta = grown
 
+    def notify_result(self, dt: float, converged: bool, clipped: bool = False):
+        """Record how the attempt at ``dt`` ended; drives the regrowth limiter
+        (called by ``DartsModel.run()`` after every attempt). ``clipped`` marks an
+        accepted step that was shortened to end exactly at the stop time of
+        ``run()``: it counts as an accepted step but never lowers the growth
+        reference, so the next interval still regrows from the last full-size step."""
+        if self.regrowth_hold_steps <= 0:
+            self._hold_left = 0
+            return
+        if not converged:
+            self._hold_left = int(self.regrowth_hold_steps)
+            self._failed_dt = float(dt)
+            self._ref_dt = 0.0
+        elif self._hold_left > 0:
+            self._hold_left -= 1
+            # regrow by regrowth_factor from the step just accepted; a step
+            # clipped to the stop time keeps the previous, full-size reference
+            self._ref_dt = max(self._ref_dt, float(dt)) if clipped else float(dt)
+
+    def effective_dt_max(self) -> float:
+        """:attr:`dt_max`, lowered while the regrowth limiter holds the step down
+        after a failure (see :meth:`notify_result`)."""
+        if self._hold_left <= 0:
+            return self.dt_max
+        cap = self.regrowth_cap * self._failed_dt
+        if self._ref_dt > 0.0:
+            cap = min(cap, self.regrowth_factor * self._ref_dt)
+        return min(self.dt_max, cap)
+
     def validate(self):
         """Raise ``ValueError`` on an obviously-invalid timestepping configuration
         (mirror of ``NonlinearSolverSpec.validate()``); called at ``init()``."""
@@ -95,6 +142,22 @@ class TimestepControl:
             raise ValueError(f"ts_control.dt_mult must be >= 1, got {self.dt_mult}")
         if self.runtime <= 0:
             raise ValueError(f"ts_control.runtime must be > 0, got {self.runtime}")
+        if (
+            int(self.regrowth_hold_steps) != self.regrowth_hold_steps
+            or self.regrowth_hold_steps < 0
+        ):
+            raise ValueError(
+                f"ts_control.regrowth_hold_steps must be a non-negative integer, got {self.regrowth_hold_steps}"
+            )
+        if self.regrowth_hold_steps > 0:
+            if not self.regrowth_factor > 1.0:
+                raise ValueError(
+                    f"ts_control.regrowth_factor must be > 1, got {self.regrowth_factor}"
+                )
+            if not 0.0 < self.regrowth_cap <= 1.0:
+                raise ValueError(
+                    f"ts_control.regrowth_cap must be in (0, 1], got {self.regrowth_cap}"
+                )
 
     def to_dict(self):
         """Serializable snapshot (mirror of ``NonlinearSolverSpec.to_dict()``)."""
@@ -105,6 +168,9 @@ class TimestepControl:
             "dt_mult": self.dt_mult,
             "dt_max": self.dt_max,
             "runtime": self.runtime,
+            "regrowth_hold_steps": self.regrowth_hold_steps,
+            "regrowth_factor": self.regrowth_factor,
+            "regrowth_cap": self.regrowth_cap,
         }
 
     def print(self):

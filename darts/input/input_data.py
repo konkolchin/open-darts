@@ -86,6 +86,9 @@ class MeshData:
         self.bnd_tags = None
         self.matrix_tags = None
         self.mesh_filename = None
+        # direction of the mesh z axis: 'downwards' (z is depth, gravity points to +z)
+        # or 'upwards' (z is elevation, gravity points to -z)
+        self.z_axis_direction = 'downwards'
 
 
 class WellControl:

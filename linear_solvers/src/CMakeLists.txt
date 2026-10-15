@@ -105,6 +105,7 @@ set(OD_LINEAR_SOLVERS_SRC_FILES
   ${CMAKE_CURRENT_SOURCE_DIR}/matrix_slice.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/linsolv_fs_cpr.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/linsolv_schur_elim.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/linsolv_block_row_perm.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/solver_registry.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/solver_factories.cpp
 )
@@ -134,6 +135,7 @@ set(OD_LINEAR_SOLVERS_PUBLIC_HEADER_FILES
   ${CMAKE_CURRENT_SOURCE_DIR}/../include/matrix_slice.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/../include/linsolv_fs_cpr.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/../include/linsolv_schur_elim.hpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/../include/linsolv_block_row_perm.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/../include/linear_solvers_data_types.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/../include/mgr_linear_solver.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/../include/MGRStrategy.hpp
@@ -181,6 +183,7 @@ if(CUDA)
     ${CMAKE_CURRENT_SOURCE_DIR}/linsolv_cusparse_ilu.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/linsolv_cusolv.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/linsolv_schur_elim.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/linsolv_block_row_perm.cpp
     PROPERTIES LANGUAGE CUDA
   )
   # AMGX is opt-in (-D WITH_AMGX=ON); it is the only GPU solver with a heavy
@@ -231,7 +234,7 @@ file(MAKE_DIRECTORY ${_od_linsolv_gen_dir})
 foreach(_od_solver linsolv_gmres linsolv_cpr linsolv_mgr linsolv_superlu
                    linsolv_bicgstab linsolv_gmres_gpu linsolv_cusolv
                    linsolv_cusparse_ilu linsolv_cudss linsolv_amgx linsolv_mcsgs
-                   csr_matrix)
+                   linsolv_block_row_perm csr_matrix)
   od_emit_template_instantiations(
     CLASS ${_od_solver}
     MAX_N ${_od_linsolv_max_n}
