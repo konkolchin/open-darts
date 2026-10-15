@@ -1179,6 +1179,7 @@ class WellOperators(OperatorsSuper):
                 v[:, flux : flux + nc_fl] = np.where(
                     on[:, None], b.x[:, j, :nc_fl] * b.dens_m[:, j : j + 1], 0.0
                 )
+                v[:, self.DENS_OP + j] = np.where(on, b.dens_m[:, j], 0.0)
                 v[:, self.GRAV_OP + j] = np.where(on, b.dens[:, j], 0.0)
                 v[:, self.LAMBDA_OP + j] = np.where(on, b.kr[:, j] / b.mu[:, j], 0.0)
                 v[:, self.SAT_OP + j] = np.where(on, b.sat[:, j], 0.0)
