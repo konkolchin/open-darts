@@ -22,7 +22,7 @@ class LinearDFMWellIPRConnection:
     ipr_intercept: float = 0.0
 
 
-class LinearDFMWellIPRHook:
+class LinearDFMWellIPR:
     """
     Apply a linear total-rate IPR for DFM well perforations.
 
@@ -36,6 +36,10 @@ class LinearDFMWellIPRHook:
 
     The total rate is converted to component molar rates using the upstream
     state and added directly to the engine RHS/Jacobian.
+
+    Store an instance on the model after defining its perforations, and call
+    ``self.linear_ipr.apply(dt=dt, t=t)`` from the model's ``apply_rhs_flux``
+    override after ``super().apply_rhs_flux(dt, t)``.
     """
 
     def __init__(
@@ -134,7 +138,7 @@ class LinearDFMWellIPRHook:
             well = self.model.reservoir.get_well(connection.well_name)
             if well.ms_type != ms_well.MS_Type.DFM:
                 raise NotImplementedError(
-                    "LinearDFMWellIPRHook currently supports only DFM wells."
+                    "LinearDFMWellIPR currently supports only DFM wells."
                 )
             if not 0 <= connection.perforation_index < len(well.perforations):
                 raise IndexError(
@@ -147,14 +151,14 @@ class LinearDFMWellIPRHook:
             if well_index != 0.0:
                 raise ValueError(
                     f"Perforation {connection.perforation_index} of well {connection.well_name!r} "
-                    f"has a non-zero well index (WI={well_index}). LinearDFMWellIPRHook manages "
+                    f"has a non-zero well index (WI={well_index}). LinearDFMWellIPR manages "
                     "the well-reservoir flux directly; a non-zero well_index would cause double-counting. "
                     "Set well_index=0.0 when calling add_perforation()."
                 )
             if well_indexD != 0.0:
                 raise ValueError(
                     f"Perforation {connection.perforation_index} of well {connection.well_name!r} "
-                    f"has a non-zero thermal well index (WID={well_indexD}). LinearDFMWellIPRHook manages "
+                    f"has a non-zero thermal well index (WID={well_indexD}). LinearDFMWellIPR manages "
                     "the well-reservoir flux directly; a non-zero well_indexD would cause double-counting. "
                     "Set well_indexD=0.0 when calling add_perforation()."
                 )

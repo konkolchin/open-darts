@@ -106,7 +106,6 @@ class DartsModel:
 
         # Create member variable wells (it is needed only for DFM wells)
         self.wells = None
-        self.rhs_flux_hooks = []
 
         # Single source of truth for verbosity. Methods with a ``verbose`` parameter
         # default to ``None`` and fall back to this attribute, so the level is set once
@@ -1161,24 +1160,16 @@ class DartsModel:
         Function to apply modifications to RHS vector.
 
         If self.set_rhs_flux() is defined in Model, this function will add its values to rhs.
-        Additional Python-side RHS/Jacobian hooks can be registered in self.rhs_flux_hooks.
 
         :param dt: timestep [days]
         :type dt: float
         :param t: current time [days]
         :type t: float
         """
-        if (
-            type(self).set_rhs_flux is DartsModel.set_rhs_flux
-            and not self.rhs_flux_hooks
-        ):
-            # If there is no user-defined RHS contribution and no Python hook, pass
+        if type(self).set_rhs_flux is DartsModel.set_rhs_flux:
             return
         rhs = np.asarray(self.physics.engine.RHS)
-        if type(self).set_rhs_flux is not DartsModel.set_rhs_flux:
-            rhs += self.set_rhs_flux(t) * dt
-        for hook in self.rhs_flux_hooks:
-            hook.apply(dt=dt, t=t)
+        rhs += self.set_rhs_flux(t) * dt
         return
 
     def print_timers(self, to_log: bool = False):

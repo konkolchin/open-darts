@@ -21,7 +21,7 @@ from dartsflash.mixtures import DARTSFlash, Mixture
 
 from darts.pipes.define_pipe_geometry import PipeGeometry
 from darts.pipes.linear_dfm_well_ipr import (
-    LinearDFMWellIPRHook,
+    LinearDFMWellIPR,
     LinearDFMWellIPRConnection,
     PI_Type,
 )
@@ -216,23 +216,25 @@ class Model(DartsModel):
                                        well_indexD=0.0,
                                        )
 
-        self.rhs_flux_hooks.append(
-            LinearDFMWellIPRHook(
-                self,
-                [
-                    LinearDFMWellIPRConnection(
-                        well_name=well_1_name,
-                        perforation_index=len(
-                            self.reservoir.get_well(well_1_name).perforations
-                        )
-                        - 1,
-                        pi=1e5,
-                        pi_type=PI_Type.MASS,
-                        ipr_pressure_offset=0.0,
+        self.linear_ipr = LinearDFMWellIPR(
+            self,
+            [
+                LinearDFMWellIPRConnection(
+                    well_name=well_1_name,
+                    perforation_index=len(
+                        self.reservoir.get_well(well_1_name).perforations
                     )
-                ],
-            )
+                    - 1,
+                    pi=1e5,
+                    pi_type=PI_Type.MASS,
+                    ipr_pressure_offset=0.0,
+                )
+            ],
         )
+
+    def apply_rhs_flux(self, dt: float, t: float):
+        super().apply_rhs_flux(dt, t)
+        self.linear_ipr.apply(dt=dt, t=t)
 
     def set_rhs_flux(self, t: float = None) -> np.ndarray:
         inj_comp = self.wells["I1"].source_sinks["RampUpRate1"].inj_fluid_props["composition"]

@@ -263,20 +263,26 @@ class SemiAnalyticalWellLateralHeatTransfer:
         )  # Multiplying the heat rate by 24 * 60 * 60 / 1000 converts the unit from Joule/second to kJ/day
 
 
-class SemiAnalyticalWellLateralHeatTransferHook:
+class SemiAnalyticalWellLateralHeatTransferAssembler:
     """
-    Hook that connects a SemiAnalyticalWellLateralHeatTransfer evaluator to the Newton solver.
+    Assemble a SemiAnalyticalWellLateralHeatTransfer contribution to the RHS.
 
     At each Newton iteration, it reads the current segment temperatures from the engine
     state vector, evaluates the lateral heat rates, and subtracts them from the energy
     equation entries of the RHS vector.
 
-    Create an instance in set_wells() and register it by appending to model.rhs_flux_hooks::
+    Create an instance in ``set_wells()``::
 
         lateral_heat_ev = SemiAnalyticalWellLateralHeatTransfer(...)
-        self.rhs_flux_hooks.append(
-            SemiAnalyticalWellLateralHeatTransferHook(self, self.reservoir.get_well(well_name), lateral_heat_ev)
+        self.lateral_heat = SemiAnalyticalWellLateralHeatTransferAssembler(
+            self, self.reservoir.get_well(well_name), lateral_heat_ev
         )
+
+    Call it from the model's ``apply_rhs_flux`` override::
+
+        def apply_rhs_flux(self, dt: float, t: float):
+            super().apply_rhs_flux(dt, t)
+            self.lateral_heat.apply(dt=dt, t=t)
     """
 
     def __init__(self, model, well, lateral_heat_ev):
@@ -303,7 +309,7 @@ class SemiAnalyticalWellLateralHeatTransferHook:
                 T_segments[i] = physics.property_containers[0].temperature
         else:
             raise NotImplementedError(
-                f"SemiAnalyticalWellLateralHeatTransferHook does not support state_spec={physics.state_spec!r}."
+                f"SemiAnalyticalWellLateralHeatTransferAssembler does not support state_spec={physics.state_spec!r}."
             )
 
         lateral_heat_rate = self.lateral_heat_ev.evaluate(T_segments, t + dt)
