@@ -9,7 +9,6 @@ from darts.engines import (
     ms_well_vector,
     sim_params,
     timer_node,
-    value_vector,
 )
 from darts.engines import print_build_info as engines_pbi
 from darts.interpolators import op_vector
@@ -103,9 +102,6 @@ class DartsModel:
         # Create member variables reservoir and physics
         self.reservoir = None
         self.physics = None
-
-        # Create member variable wells (it is needed only for DFM wells)
-        self.wells = None
 
         # Single source of truth for verbosity. Methods with a ``verbose`` parameter
         # default to ``None`` and fall back to this attribute, so the level is set once
@@ -275,13 +271,13 @@ class DartsModel:
             well.ms_type == ms_well.MS_Type.DFM for well in self.reservoir.wells
         )
         if self.has_dfm_well:
-            assert platform == "cpu", "DFM wells require platform='cpu'"
-            self.timer.node["simulation"].node["dfm_well_velocity_calculation"] = (
-                timer_node()
-            )
-        else:
-            # If there are no DFM wells, no Python well objects are needed.
-            self.wells = None
+            from darts.models.dfm_model import DFMWellModel
+
+            if not isinstance(self, DFMWellModel):
+                raise TypeError(
+                    "A model with DFM wells must derive from "
+                    "darts.models.dfm_model.DFMWellModel instead of DartsModel."
+                )
 
         # Initialize physics and Engine object
         assert self.physics is not None, "Physics object has not been defined"
@@ -725,7 +721,6 @@ class DartsModel:
             compression=compression,
             compression_level=compression_level,
             verbose=bool(verbose),
-            wells=self.wells,
             has_dfm_well=self.has_dfm_well,
         )
 
@@ -926,7 +921,6 @@ class DartsModel:
                 t += dt
                 self.physics.engine.t = t
                 ts_counter += 1
-                self.accept_pipe_states()
                 self.after_converged_timestep()
 
                 x = np.asarray(self.physics.engine.X)[: nb * nc]
@@ -1065,47 +1059,6 @@ class DartsModel:
         :type verbose: int
         """
         return self.nonlinear_solver.solve_timestep(dt, t, verbose)
-
-    def update_dfm_well_vels_and_ders(self, dt, t, iter_counter):
-        """
-        Update phase velocities and their corresponding derivatives in DFM wells
-
-        :param dt: Time step size [day]
-        :type dt: float
-        :param t: Simulation time [day]
-        :type t: float
-        :param iter_counter: Newton-Raphson iteration counter for the current time step
-        :type iter_counter: int
-        """
-        self.timer.node["simulation"].node["dfm_well_velocity_calculation"].start()
-        for w in self.reservoir.wells:
-            if w.ms_type == ms_well.MS_Type.DFM:
-                start = w.well_head_idx * self.physics.n_vars
-                stop = (w.well_head_idx + w.num_segments) * self.physics.n_vars
-
-                Xn_dfm_well = np.asarray(self.physics.engine.Xn)[start:stop]
-                X_dfm_well = np.asarray(self.physics.engine.X)[start:stop]
-                well_phase_v, well_phase_v_d = self.wells[
-                    w.name
-                ].eval_phase_vels_and_ders(Xn_dfm_well, X_dfm_well, dt, t, iter_counter)
-                w.phases_vels = value_vector(well_phase_v)
-                w.phases_vels_ders = value_vector(well_phase_v_d)
-        self.timer.node["simulation"].node["dfm_well_velocity_calculation"].stop()
-
-    def accept_pipe_states(self):
-        """
-        Store DFM pipe states.
-
-        Pipe velocity evaluator uses the previous accepted pipe state for the subsequent timestep.
-        This function must be used when a timestep has converged to accept the current pipe
-        state as the accepted pipe state to be used for the next timestep.
-        """
-        if not self.has_dfm_well:
-            return
-
-        for w in self.reservoir.wells:
-            if w.ms_type == ms_well.MS_Type.DFM:
-                self.wells[w.name].accept_pipe_state()
 
     def do_after_step(self):
         """

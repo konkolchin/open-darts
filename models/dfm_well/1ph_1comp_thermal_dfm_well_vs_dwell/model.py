@@ -1,6 +1,6 @@
 import numpy as np
 
-from darts.models.darts_model import DartsModel
+from darts.models.dfm_model import DFMWellModel
 from darts.engines import ms_well, value_vector
 from darts.nonlinear_solvers import NewtonSolver, ChopSpec
 
@@ -21,7 +21,7 @@ from darts.pipes.pipe import Pipe
 from darts.pipes.interfacial_tension import IFT_multicomponent_MCM
 
 
-class Model(DartsModel):
+class Model(DFMWellModel):
     def __init__(self):
         # Call base class constructor
         super().__init__()

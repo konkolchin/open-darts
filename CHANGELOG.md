@@ -55,6 +55,7 @@
 - Breaking changes:
   - Results of `mech_discretizer` models change in boundary cells. Mechanics engines no longer expose `N_VARS`; use `engine.get_n_vars()`. Results of models with multi-segment wells in `mech_discretizer` change. `UnstructReservoirMech.add_well(name, depth)` is now `add_well(well_name)`, and `add_perforation(well, res_cell_idx, well_index)` is now `add_perforation(well_name, res_cell_idx, ..., well_index=...)` (the well name instead of the `ms_well` object; `well_index` is required). [!323](https://gitlab.com/open-darts/open-darts/-/merge_requests/323)
   - Results of `mech_discretizer` models with Biot or thermal-expansion contrasts, and of models using the default `init_gravity()`, change. Layered models that start from non-zero pressure or temperature should be initialized with `set_equilibrium`. ([!355](https://gitlab.com/open-darts/open-darts/-/merge_requests/355))
+  - Models with DFM wells derive from the new `darts.models.dfm_model.DFMWellModel` instead of `DartsModel`, which now raises `TypeError` for them; `wells`, `update_dfm_well_vels_and_ders()` and `accept_pipe_states()` moved to the new class. ([!305](https://gitlab.com/open-darts/open-darts/-/merge_requests/305))
 
 # 2.0.0 [10-09-2026]
 - Solvers ([!280](https://gitlab.com/open-darts/open-darts/-/merge_requests/280)):
