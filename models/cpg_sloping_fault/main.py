@@ -138,12 +138,12 @@ def run(physics_type : str, case: str, out_dir: str, export_vtk=True, redirect_l
         td = m.output.store_well_time_data(save_output_files=True)
         time_data = pd.DataFrame.from_dict(td)
         # plot volumetric rates (by_sum_perfs and at_wh) and BHP/BHT
-        m.output.plot_well_time_data(phase_molar_rates=False,
-                                     phase_mass_rates=False,
-                                     phase_volumetric_rates=True,
-                                     component_molar_rates=False,
-                                     component_mass_rates=False,
-                                     advective_heat_rates=False)
+        m.output.plot_well_time_data(phase_molar_rate=False,
+                                     phase_mass_rate=False,
+                                     phase_volumetric_rate=True,
+                                     component_molar_rate=False,
+                                     component_mass_rate=False,
+                                     energy_rate=False)
         # add_columns_time_data(time_data)
 
         # COMPUTE TIME DATA AT FIXED REPORTING STEPS

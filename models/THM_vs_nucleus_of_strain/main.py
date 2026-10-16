@@ -276,10 +276,10 @@ def plot_results(model, time_data_dict, out_dir):
         save_plot('well_water_rate')
 
     # Cumulative extracted energy is meaningful only for a thermal case with
-    # at least one production well. Advective heat rate is stored in kJ/day;
+    # at least one production well. Energy rate is stored in kJ/day;
     # integration over days and 1e-12 convert it to PJ.
     if model.thermal and production_wells:
-        heat_suffix = '_advective_heat_rate_wat_at_wh'
+        heat_suffix = '_energy_rate_relative_to_ref_state_wat_at_wh'
         heat_keys = [
             f'well_{name}{heat_suffix}' for name in production_wells
             if f'well_{name}{heat_suffix}' in time_data
@@ -694,7 +694,9 @@ def run(model_folder, decouple_geomech=None, generate_mesh=None, report_step=Non
     m.print_timers()
     #m.print_stat()
     if save_well_time_data:
-        time_data_dict = m.output.store_well_time_data(save_output_files=True)
+        time_data_dict = m.output.store_well_time_data(
+            save_output_files=True, energy_rate_relative_to_ref_state=True
+        )
         plot_results(
             model=m,
             time_data_dict=time_data_dict,
@@ -703,7 +705,7 @@ def run(model_folder, decouple_geomech=None, generate_mesh=None, report_step=Non
     print('Output folder:', m.output_directory, 'Timesteps:', ith_step, 't=', m.physics.engine.t, 'days')
     print_allocated_memory()
 
-    #m.output.plot_well_time_data(phase_volumetric_rates=True)
+    #m.output.plot_well_time_data(phase_volumetric_rate=True)
 
     for tstep_to_plot in plot_vtk_timesteps:
         plot_vtk_pyvista(m.output_directory, tstep_to_plot=tstep_to_plot, idata=m.idata,
