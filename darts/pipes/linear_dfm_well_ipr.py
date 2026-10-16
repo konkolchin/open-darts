@@ -40,6 +40,9 @@ class LinearDFMWellIPR:
     Store an instance on the model after defining its perforations, and call
     ``self.linear_ipr.apply(dt=dt, t=t)`` from the model's ``apply_rhs_flux``
     override after ``super().apply_rhs_flux(dt, t)``.
+
+    The perforations of the connections have a zero well index, so
+    ``Output.store_well_time_data()`` reports zero perforation rates for them.
     """
 
     def __init__(
