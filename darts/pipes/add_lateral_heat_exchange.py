@@ -266,11 +266,11 @@ class SemiAnalyticalWellLateralHeatTransfer:
 
 class SemiAnalyticalWellLateralHeatTransferAssembler:
     """
-    Assemble a SemiAnalyticalWellLateralHeatTransfer contribution to the RHS.
+    Assemble a SemiAnalyticalWellLateralHeatTransfer contribution to the RHS and Jacobian.
 
     At each Newton iteration, it reads the current segment temperatures from the engine
-    state vector, evaluates the lateral heat rates, and subtracts them from the energy
-    equation entries of the RHS vector.
+    state vector, evaluates the lateral heat rates, subtracts them from the energy
+    equation entries of the RHS vector, and adds their derivatives to the Jacobian.
 
     Create an instance in ``set_wells()``::
 
@@ -313,6 +313,11 @@ class SemiAnalyticalWellLateralHeatTransferAssembler:
                 f"SemiAnalyticalWellLateralHeatTransferAssembler does not support state_spec={physics.state_spec!r}."
             )
 
+        # The heat rate is linear in T_earth - T, so its value at T = T_earth - 1 K is
+        # the conductance C [kJ/day/K].
+        conductance = self.lateral_heat_ev.evaluate(
+            self.lateral_heat_ev.T_earth - 1.0, t + dt
+        )
         lateral_heat_rate = self.lateral_heat_ev.evaluate(T_segments, t + dt)
         rhs = np.asarray(physics.engine.RHS)
         rhs_well = rhs[
@@ -323,6 +328,18 @@ class SemiAnalyticalWellLateralHeatTransferAssembler:
         # row is a control equation, so it receives no lateral heat.
         first = int(well.control.get_well_control_type() != well_control_iface.NONE)
         rhs_well[first:, -1] -= lateral_heat_rate[first:] * dt
+
+        # d(-q dt)/dx = C dt dT/dx in the energy row, with dT/dx from the temperature
+        # operator assembled for the current state.
+        temp_op_ders = np.asarray(physics.engine.op_ders_arr).reshape(
+            -1, physics.n_ops, n_vars
+        )[:, physics.well_operators.TEMP_OP]
+        jac_vals = np.asarray(physics.engine.jac_vals)
+        jac_diags = np.asarray(physics.engine.jac_diags)
+        for i in range(first, well.num_segments):
+            block = well.well_head_idx + i
+            row = (jac_diags[block] * n_vars + n_vars - 1) * n_vars
+            jac_vals[row : row + n_vars] += conductance[i] * dt * temp_op_ders[block]
 
 
 def add_numerical_well_lateral_heat_transfer(
