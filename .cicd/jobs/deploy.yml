@@ -112,6 +112,9 @@ deploy-apptainer-runtime-gpu-image:
         # template, so it is stated here.)
         APPTAINER_TMPDIR: "/data/gitlab-runner/apptainer-tmp"
         APPTAINER_CACHEDIR: "/data/gitlab-runner/apptainer-cache"
+        # This job's registry login. A login's default file lies in the runner account's home, which every job
+        # shares and which outlives the job; this one lies in the job's directory and goes in after_script.
+        REGISTRY_AUTH: "${CI_PROJECT_DIR}/.registry-auth.json"
     needs:
         - job: apptainer-runtime-gpu-image
           artifacts: true
@@ -157,31 +160,53 @@ deploy-apptainer-runtime-gpu-image:
             *\;*) : ;;
             *) echo "WARNING: publishing an image with a single GPU target (${ARCH_LABEL:-<none>})" >&2 ;;
           esac
-        - apptainer registry login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" "oras://$CI_REGISTRY"
+        - |
+          # The token goes in on stdin: a command line is visible to every user of the machine (ps).
+          printf '%s' "$CI_REGISTRY_PASSWORD" |
+            apptainer registry login --authfile "$REGISTRY_AUTH" -u "$CI_REGISTRY_USER" --password-stdin \
+              "oras://$CI_REGISTRY"
         - |
           REPO="$CI_REGISTRY_IMAGE/darts-gpu"
-          # The immutable coordinate is always safe to push.
-          TAGS="${CI_COMMIT_SHA:0:12}"
+          # The first push uploads the whole SIF in one long request. A connection that breaks on the way ends
+          # that push for good (apptainer's own retry re-sends the file it has already closed: "read ...sif: file
+          # already closed"), so every tag gets three attempts. Once the image is in the registry, a further tag
+          # only adds a manifest and takes seconds.
+          TAGS=""
+          push() {
+            local attempt
+            for attempt in 1 2 3; do
+              echo "Pushing oras://$REPO:$1"
+              if apptainer push --authfile "$REGISTRY_AUTH" "$RUNTIME_IMAGE" "oras://$REPO:$1"; then
+                TAGS="$TAGS $1"
+                return 0
+              fi
+              echo "push of $1 failed (attempt $attempt of 3)" >&2
+              if [ "$attempt" -lt 3 ]; then sleep 60; fi
+            done
+            return 1
+          }
+          # The immutable coordinate first: it carries the upload.
+          push "${CI_COMMIT_SHA:0:12}"
           if [ -n "${CI_COMMIT_TAG:-}" ]; then
-            TAGS="${CI_COMMIT_TAG#v} $TAGS"
+            push "${CI_COMMIT_TAG#v}"
           elif [ "${CI_COMMIT_BRANCH:-}" = "development" ]; then
             # `latest` is a moving pointer, so only ever move it forward. A
             # portable build takes about an hour, so development pipelines
             # finish out of order, and old pipelines get re-run -- either would
             # otherwise point `latest` back at an older commit. Only claim it
-            # while this commit is still the tip of development.
+            # while this commit is still the tip of development, checked once
+            # the upload is done.
             TIP="$(git ls-remote origin refs/heads/development 2>/dev/null | cut -f1 || true)"
             if [ "$TIP" = "$CI_COMMIT_SHA" ]; then
-              TAGS="latest $TAGS"
+              push latest
             elif [ -z "$TIP" ]; then
               echo "WARNING: could not read the tip of development; leaving 'latest' untouched" >&2
             else
               echo "development has moved on to ${TIP:0:12}; leaving 'latest' to that pipeline"
             fi
           fi
-          for t in $TAGS; do
-            echo "Pushing oras://$REPO:$t"
-            apptainer push "$RUNTIME_IMAGE" "oras://$REPO:$t"
-          done
           echo
           for t in $TAGS; do echo "Pull with:  apptainer pull oras://$REPO:$t"; done
+    after_script:
+        # also after a failed job: the login leaves with it
+        - rm -f "$REGISTRY_AUTH"
