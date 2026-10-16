@@ -473,8 +473,8 @@ class DartsModel:
                     log_transform=False,  # solve in log-composition variables
                 ),
                 obl_bounds=OBLBoundsSpec(
-                    mode=None,  # None (off) | 'obl_axes'
-                    axis_min=None,  # per-state-variable lower bounds
+                    mode="obl_axes",  # None (off) | 'obl_axes'
+                    axis_min=[1e-6] + [None] * (self.physics.n_vars - 1),
                     axis_max=None,  # per-state-variable upper bounds
                 ),
             )

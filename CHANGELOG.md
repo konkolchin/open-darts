@@ -53,6 +53,7 @@
   - `store_well_time_data()` and `plot_well_time_data()` report well energy rates in two ways: `energy_rate` (default) is the phase flow times its enthalpy, and the optional `energy_rate_relative_to_ref_state` is the flow times its enthalpy rise above a reference state. Set the `ref_pressure` [bar] and `ref_temperature` [K] arguments of `store_well_time_data()` to change the defaults of 1 atm and 15 deg C. ([!360](https://gitlab.com/open-darts/open-darts/-/merge_requests/360))
   - Fixed the reference-state subtraction of the advective heat rate. ([`46d32684`](https://gitlab.com/open-darts/open-darts/-/commit/46d32684))
 - Breaking changes:
+  - Default model pressure bound: Before, the default `DartsModel` Newton solver left pressure unbounded. Now, it enables OBL update bounds with a pressure floor of `1e-6` bar; other state variables remain unbounded.
   - The `advective_heat_rates` argument of `store_well_time_data()` and `plot_well_time_data()` is replaced by two arguments, and every rate selection argument is now singular, matching the keys it produces:\
   {- Before: m.output.store_well_time_data(phase_molar_rates=True, advective_heat_rates=True) -}\
   {+ Now:    m.output.store_well_time_data(phase_molar_rate=True, energy_rate=True, energy_rate_relative_to_ref_state=False) +}
