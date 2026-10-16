@@ -1,5 +1,6 @@
 import numpy as np
 
+from darts.engines import well_control_iface
 from darts.pipes.define_pipe_geometry import PipeGeometry
 
 
@@ -318,7 +319,10 @@ class SemiAnalyticalWellLateralHeatTransferAssembler:
             well.well_head_idx * n_vars : (well.well_head_idx + well.num_segments)
             * n_vars
         ].reshape(well.num_segments, n_vars)
-        rhs_well[:, -1] -= lateral_heat_rate * dt
+        # Segment 0 is the wellhead block: with an active well control, its energy
+        # row is a control equation, so it receives no lateral heat.
+        first = int(well.control.get_well_control_type() != well_control_iface.NONE)
+        rhs_well[first:, -1] -= lateral_heat_rate[first:] * dt
 
 
 def add_numerical_well_lateral_heat_transfer(
