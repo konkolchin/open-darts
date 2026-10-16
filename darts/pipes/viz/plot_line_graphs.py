@@ -7,6 +7,7 @@ import pandas as pd
 from matplotlib.ticker import MultipleLocator
 
 from darts.models.darts_model import DartsModel
+from darts.pipes.viz.plot_well_property_profiles import _line_property_values
 from darts.tools.hdf5_tools import load_hdf5_to_dict
 
 
@@ -54,6 +55,20 @@ def plot_line_graphs(
     fluid_components_names = pc.components_name[: pc.nc_fl]
     num_components = len(components_names)
     n_mobile_phases = coupled_model.wells[well_name].n_mobile_phases
+
+    phase_names = ("G",)
+    if n_mobile_phases == 2:
+        phase_names += ("L",)
+    elif n_mobile_phases == 3:
+        phase_names += ("L_a", "L_b")
+    phase_properties = ["rhoG", "rhoL", "muG", "muL"]
+    phase_properties += [
+        f"x{component}_in_{phase}_mass"
+        for phase in phase_names
+        for component in fluid_components_names
+    ]
+    for prop_name in phase_properties:
+        data_frame[prop_name] = _line_property_values(data_frame, prop_name)
 
     # Convert days to seconds
     simulated_time = h5_well_dict["dynamic"]["time"] * 24 * 60 * 60

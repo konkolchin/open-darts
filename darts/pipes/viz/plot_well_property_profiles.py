@@ -5,6 +5,7 @@ import re
 import shutil
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import matplotlib as mpl
 import matplotlib.pyplot as plt
@@ -14,8 +15,10 @@ from matplotlib.axes import Axes
 from matplotlib.figure import Figure
 from matplotlib.ticker import FormatStrFormatter
 
-from darts.models.darts_model import DartsModel
 from darts.tools.hdf5_tools import load_hdf5_to_dict
+
+if TYPE_CHECKING:
+    from darts.models.darts_model import DartsModel
 
 
 @dataclass(frozen=True)
@@ -228,6 +231,10 @@ def _infer_plot_specs(
     for column in data_frame.columns:
         sample = _get_first_valid_value(data_frame[column])
         if sample is None:
+            if pd.api.types.is_numeric_dtype(data_frame[column]):
+                specs.append(
+                    _make_plot_spec(column, None, property_labels, property_offsets)
+                )
             continue
         sample_array = np.asarray(sample)
         if sample_array.ndim == 0:
@@ -248,7 +255,8 @@ def _infer_plot_specs(
     return [
         spec
         for spec in specs
-        if _is_numeric_profile(data_frame, spec.property_key, spec.component_index)
+        if data_frame[spec.property_key].dropna().empty
+        or _is_numeric_profile(data_frame, spec.property_key, spec.component_index)
     ]
 
 
@@ -277,6 +285,8 @@ def _validate_plot_specs(
             raise ValueError(
                 f"Column '{spec.property_key}' was not found in well property data."
             )
+        if data_frame[spec.property_key].dropna().empty:
+            continue
         if not _is_numeric_profile(data_frame, spec.property_key, spec.component_index):
             raise ValueError(
                 f"Column '{_get_spec_key(spec)}' is not numeric and cannot be plotted."
@@ -349,14 +359,62 @@ def _get_profile_values(
             f"index {report_index}."
         )
 
-    if spec.component_index is None:
-        profile = values.to_numpy(dtype=float)
+    profile = _line_property_values(
+        data_frame.iloc[start:stop], spec.property_key, spec.component_index
+    )
+    return profile + spec.offset
+
+
+def _line_property_phase(property_key):
+    if property_key.startswith("rho"):
+        return property_key[3:]
+    if property_key.startswith("mu"):
+        return property_key[2:]
+    if (
+        property_key.startswith("x")
+        and property_key.endswith("_mass")
+        and "_in_" in property_key
+    ):
+        return property_key[1:-5].rsplit("_in_", 1)[1]
+    return None
+
+
+def _line_property_values(data_frame, property_key, component_index=None):
+    """
+    Mask undefined phase properties without hiding meaningful zero values.
+
+    Density and viscosity must be positive. Phase-specific properties require
+    a present phase when saturation or density is available. Zero saturation,
+    flow, and component fractions in present phases remain valid.
+    """
+    if property_key not in data_frame.columns:
+        return np.full(len(data_frame), np.nan)
+    series = data_frame[property_key]
+    if component_index is None:
+        values = series.to_numpy(dtype=float, copy=True)
     else:
-        profile = np.asarray(
-            [np.asarray(value)[spec.component_index] for value in values],
+        values = np.asarray(
+            [
+                np.asarray(value)[component_index] if np.asarray(value).ndim else np.nan
+                for value in series
+            ],
             dtype=float,
         )
-    return profile + spec.offset
+    valid = np.isfinite(values)
+    phase = _line_property_phase(property_key)
+    if phase:
+        saturation_key = f"s{phase}"
+        density_key = f"rho{phase}"
+        if saturation_key in data_frame.columns:
+            saturation = data_frame[saturation_key].to_numpy(dtype=float)
+            valid &= np.isfinite(saturation) & (saturation > 0)
+        if density_key in data_frame.columns:
+            density = data_frame[density_key].to_numpy(dtype=float)
+            valid &= np.isfinite(density) & (density > 0)
+        if property_key.startswith(("rho", "mu")):
+            valid &= values > 0
+    values[~valid] = np.nan
+    return values
 
 
 def _prepare_output_dir(
@@ -576,8 +634,20 @@ def plot_well_1d_reservoir_line_graphs(
         well_times, reported_times, "well_data.h5", time_atol, time_rtol
     )
 
+    requested_props = list(prop_names)
+    available_props = {
+        key
+        for container in coupled_model.physics.property_containers.values()
+        for key in container.output_props
+    }
+    for prop in prop_names:
+        phase = _line_property_phase(prop)
+        if phase:
+            for companion in (f"s{phase}", f"rho{phase}"):
+                if companion in available_props and companion not in requested_props:
+                    requested_props.append(companion)
     reservoir_times, reservoir_props = coupled_model.output.output_properties(
-        output_properties=prop_names
+        output_properties=requested_props
     )
     reservoir_time_indices = _get_matching_time_indices(
         reservoir_times,
@@ -597,7 +667,7 @@ def plot_well_1d_reservoir_line_graphs(
     )
     reservoir_radial_distance = reservoir_radial_distance_all[reservoir_cell_indices]
     reservoir_prop_matrices = {}
-    for prop in prop_names:
+    for prop in requested_props:
         reservoir_prop_matrix = np.asarray(reservoir_props[prop], dtype=float)
         if reservoir_prop_matrix.shape[1] < reservoir_radial_distance_all.size:
             raise ValueError(
@@ -605,6 +675,15 @@ def plot_well_1d_reservoir_line_graphs(
                 f"cells, but the 1D reservoir geometry has {reservoir_radial_distance_all.size} cells."
             )
         reservoir_prop_matrices[prop] = reservoir_prop_matrix
+
+    reservoir_frame = pd.DataFrame(
+        {prop: values.reshape(-1) for prop, values in reservoir_prop_matrices.items()}
+    )
+    for prop in prop_names:
+        matrix = reservoir_prop_matrices[prop]
+        reservoir_prop_matrices[prop] = _line_property_values(
+            reservoir_frame, prop
+        ).reshape(matrix.shape)
 
     output_dir = _prepare_well_res_output_dir(coupled_model, well_name, output_dir)
 
@@ -871,7 +950,7 @@ def _get_well_profile(data_frame, prop_name, time_idx, num_segments):
             f"Well property '{prop_name}' has no complete profile at time index {time_idx}."
         )
     try:
-        return profile.astype(float)
+        return _line_property_values(data_frame.iloc[start:stop], prop_name)
     except (TypeError, ValueError) as exc:
         raise ValueError(
             f"Property '{prop_name}' is not a scalar profile and cannot be plotted by this function."

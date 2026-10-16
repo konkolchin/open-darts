@@ -11,6 +11,7 @@ from matplotlib.axes import Axes
 from matplotlib.figure import Figure
 from matplotlib.ticker import MultipleLocator
 
+from darts.pipes.viz.plot_well_property_profiles import _line_property_values
 from darts.tools.hdf5_tools import load_hdf5_to_dict
 
 
@@ -207,7 +208,7 @@ def _get_stacked_profile(
 
     start = selected_profile_index * num_segments
     stop = start + num_segments
-    return series.iloc[start:stop].to_numpy(dtype=float)
+    return _line_property_values(data_frame.iloc[start:stop], property_key)
 
 
 def plot_well_segment_property_vs_time(
@@ -456,8 +457,9 @@ def _get_segment_time_series(
     num_segments: int,
     segment_index: int,
 ) -> np.ndarray:
-    values = data_frame[property_key].iloc[segment_index::num_segments]
-    return values.to_numpy(dtype=float)
+    return _line_property_values(
+        data_frame.iloc[segment_index::num_segments], property_key
+    )
 
 
 def _resolve_segment_index(segment_index: int, num_segments: int) -> int:
