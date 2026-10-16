@@ -13,8 +13,7 @@ import os
 
 from darts.engines import redirect_darts_output
 from darts.pipes.save_results import save_dfm_well_props
-from darts.pipes.viz.plot_heat_map_pcolormesh import plot_heat_map_pcolormesh
-from darts.pipes.viz.plot_heat_map_contourf import plot_heat_map_contourf
+from darts.pipes.viz.plot_heat_maps import plot_heat_maps
 from darts.pipes.viz.plot_line_graphs import plot_line_graphs
 
 from model import Model
@@ -99,9 +98,9 @@ save_dfm_well_props(
     include_phase_rates=True,
 )
 
-# plot_heat_map_pcolormesh('I1', coupled_model, show_plot=False)
-plot_heat_map_contourf('I1', coupled_model, y_axis_tick_interval=250, show_plot=False)
+# plot_heat_maps('I1', coupled_model, method="pcolormesh", show_plot=False)
+plot_heat_maps('I1', coupled_model, method="contourf", y_axis_tick_interval=250, show_plot=False)
 
 # Use line graphs if injection rate is controlled because the wellhead state might change a lot (for numerical reasons)
-# at the beginning of simulation and this may create confusion if plot_heat_map_pcolormesh or plot_heat_map_contourf is used.
+# at the beginning of simulation and this may create confusion if plot_heat_maps is used.
 # plot_line_graphs('I1', coupled_model, show_plot=False)
