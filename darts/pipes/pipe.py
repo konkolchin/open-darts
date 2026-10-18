@@ -26,9 +26,15 @@ Notes:
 import math
 from dataclasses import dataclass
 
+import numpy as np
 from scipy.optimize import fsolve
 
 from darts.engines import index_vector, value_vector
+from darts.pipes._velocity import (
+    _average_phase_properties,
+    _colebrook_fanning,
+    _phase_velocity_kernel,
+)
 from darts.pipes.define_pipe_geometry import PipeGeometry
 from darts.pipes.ramp_up_rate import RampUpRate
 from darts.pipes.set_initial_conditions import (
@@ -562,7 +568,6 @@ class Pipe:
         num_segments = geom.num_segments
         num_interfaces = geom.num_interfaces
         pc = self.physics.property_containers[0]
-        Mw_fl = np.asarray(pc.Mw[: pc.nc_fl])
         n_vars = self.physics.n_vars
 
         Xn_dfm_well_2d = Xn_dfm_well.reshape(num_segments, n_vars)
@@ -677,8 +682,6 @@ class Pipe:
                 for i in range(num_segments):
                     state0 = Xn_dfm_well_2d[i, :]
                     pc.evaluate(state0)
-                    if self.physics.thermal:
-                        pc.evaluate_thermal(state0)
 
                     sG0[i] = pc.sat[g_idx]
                     rhoG0[i] = pc.dens[g_idx]
@@ -687,12 +690,7 @@ class Pipe:
                         sL0[i] = pc.sat[l_idx]
                         rhoL0[i] = pc.dens[l_idx]
                         muL0[i] = pc.mu[l_idx] * 1e-3  # convert cP to Pa.s
-                        # Calculate mass fractions of components in each phase
-                        x_mass0 = np.zeros((pc.np_fl, pc.nc_fl))
-                        for j in pc.ph:
-                            x_mass0[j, :] = (pc.x[j, :] * Mw_fl) / sum(
-                                pc.x[j, :] * Mw_fl
-                            )
+                        x_mass0 = pc.x_mass
                         xG_mass0[i, :], xL_mass0[i, :] = (
                             x_mass0[g_idx, :],
                             x_mass0[l_idx, :],
@@ -706,12 +704,7 @@ class Pipe:
                             pc.mu[la_idx] * 1e-3,
                             pc.mu[lb_idx] * 1e-3,
                         )
-                        # Calculate mass fractions of components in each phase
-                        x_mass0 = np.zeros((pc.np_fl, pc.nc_fl))
-                        for j in pc.ph:
-                            x_mass0[j, :] = (pc.x[j, :] * Mw_fl) / sum(
-                                pc.x[j, :] * Mw_fl
-                            )
+                        x_mass0 = pc.x_mass
                         xG_mass0[i, :], xL_a_mass_0[i, :], xL_b_mass_0[i, :] = (
                             x_mass0[g_idx, :],
                             x_mass0[la_idx, :],
@@ -846,8 +839,6 @@ class Pipe:
             for i in range(num_segments):
                 state = X_dfm_well_2d[i, :]
                 pc.evaluate(state)
-                if self.physics.thermal:
-                    pc.evaluate_thermal(state)
 
                 sG[i] = pc.sat[g_idx]
                 rhoG[i] = pc.dens[g_idx]
@@ -856,10 +847,7 @@ class Pipe:
                     sL[i] = pc.sat[l_idx]
                     rhoL[i] = pc.dens[l_idx]
                     muL[i] = pc.mu[l_idx] * 1e-3  # convert cP to Pa.s
-                    # Calculate mass fractions of components in each phase
-                    x_mass = np.zeros((pc.np_fl, pc.nc_fl))
-                    for j in pc.ph:
-                        x_mass[j, :] = (pc.x[j, :] * Mw_fl) / sum(pc.x[j, :] * Mw_fl)
+                    x_mass = pc.x_mass
                     xG_mass[i, :], xL_mass[i, :] = x_mass[g_idx, :], x_mass[l_idx, :]
 
                 if self.n_mobile_phases == 3:
@@ -867,10 +855,7 @@ class Pipe:
                     sL[i] = sL_a[i] + sL_b[i]
                     rhoL_a[i], rhoL_b[i] = pc.dens[la_idx], pc.dens[lb_idx]
                     muL_a[i], muL_b[i] = pc.mu[la_idx] * 1e-3, pc.mu[lb_idx] * 1e-3
-                    # Calculate mass fractions of components in each phase
-                    x_mass = np.zeros((pc.np_fl, pc.nc_fl))
-                    for j in pc.ph:
-                        x_mass[j, :] = (pc.x[j, :] * Mw_fl) / sum(pc.x[j, :] * Mw_fl)
+                    x_mass = pc.x_mass
                     xG_mass[i, :], xL_a_mass[i, :], xL_b_mass[i, :] = (
                         x_mass[g_idx, :],
                         x_mass[la_idx, :],
@@ -903,16 +888,16 @@ class Pipe:
 
         # If the differentiation method is OBL, calculate phase property derivatives
         if self.diff_method == "OBL":
-            sG_der = self.get_op_der_matrix(op_idx=SAT_OP + g_idx)
-            rhoG_der = self.get_op_der_matrix(op_idx=GRAV_OP + g_idx)
+            sG_der = self._get_local_op_derivatives(op_idx=SAT_OP + g_idx)
+            rhoG_der = self._get_local_op_derivatives(op_idx=GRAV_OP + g_idx)
             if self.n_mobile_phases == 2:
-                sL_der = self.get_op_der_matrix(op_idx=SAT_OP + l_idx)
-                rhoL_der = self.get_op_der_matrix(op_idx=GRAV_OP + l_idx)
+                sL_der = self._get_local_op_derivatives(op_idx=SAT_OP + l_idx)
+                rhoL_der = self._get_local_op_derivatives(op_idx=GRAV_OP + l_idx)
             elif self.n_mobile_phases == 3:
-                rhoL_a_der = self.get_op_der_matrix(op_idx=GRAV_OP + la_idx)
-                rhoL_b_der = self.get_op_der_matrix(op_idx=GRAV_OP + lb_idx)
-                sL_a_der = self.get_op_der_matrix(op_idx=SAT_OP + la_idx)
-                sL_b_der = self.get_op_der_matrix(op_idx=SAT_OP + lb_idx)
+                rhoL_a_der = self._get_local_op_derivatives(op_idx=GRAV_OP + la_idx)
+                rhoL_b_der = self._get_local_op_derivatives(op_idx=GRAV_OP + lb_idx)
+                sL_a_der = self._get_local_op_derivatives(op_idx=SAT_OP + la_idx)
+                sL_b_der = self._get_local_op_derivatives(op_idx=SAT_OP + lb_idx)
                 sL_der = sL_a_der + sL_b_der
 
                 sL = sL_a + sL_b
@@ -933,64 +918,12 @@ class Pipe:
             sG0_face = (sG0[:-1] + sG0[1:]) / 2
             sL0_face = (sL0[:-1] + sL0[1:]) / 2
 
-            # Initialize arrays to store interface properties
-            rhoG0_face = np.zeros(num_segments - 1)
-            rhoL0_face = np.zeros(num_segments - 1)
-            muG0_face = np.zeros(num_segments - 1)
-            muL0_face = np.zeros(num_segments - 1)
-            # xG_mass0_face and xL_mass0_face for IFT calculation
-            xG_mass0_face = np.zeros((num_segments - 1, pc.nc_fl))
-            xL_mass0_face = np.zeros((num_segments - 1, pc.nc_fl))
-
-            # Compute interface values using conditional averaging
-            for i in range(num_segments - 1):
-                if sG0[i] == 0:
-                    # If no gas in segment i, use properties from segment i+1
-                    rhoG0_face[i] = rhoG0[i + 1]
-                    muG0_face[i] = muG0[i + 1]
-                    xG_mass0_face[i] = xG_mass0[i + 1]
-                elif sG0[i + 1] == 0:
-                    # If no gas in segment i+1, use properties from segment i
-                    rhoG0_face[i] = rhoG0[i]
-                    muG0_face[i] = muG0[i]
-                    xG_mass0_face[i] = xG_mass0[i]
-                else:
-                    # If both segments have gas, use averaging
-                    rhoG0_face[i] = (rhoG0[i] + rhoG0[i + 1]) / 2
-                    muG0_face[i] = (muG0[i] + muG0[i + 1]) / 2
-
-                    xG_mass0_face[i] = (
-                        xG_mass0[i] * rhoG0[i] * sG0[i]
-                        + xG_mass0[i + 1] * rhoG0[i + 1] * sG0[i + 1]
-                    ) / (rhoG0[i] * sG0[i] + rhoG0[i + 1] * sG0[i + 1])
-
-                liquid_weight_i = rhoL0[i] * sL0[i]
-                liquid_weight_ip1 = rhoL0[i + 1] * sL0[i + 1]
-                liquid_weight_sum = liquid_weight_i + liquid_weight_ip1
-
-                if liquid_weight_i == 0 and liquid_weight_ip1 > 0:
-                    # If no liquid in segment i, use properties from segment i+1
-                    rhoL0_face[i] = rhoL0[i + 1]
-                    muL0_face[i] = muL0[i + 1]
-                    xL_mass0_face[i] = xL_mass0[i + 1]
-                elif liquid_weight_ip1 == 0 and liquid_weight_i > 0:
-                    # If no liquid in segment i+1, use properties from segment i
-                    rhoL0_face[i] = rhoL0[i]
-                    muL0_face[i] = muL0[i]
-                    xL_mass0_face[i] = xL_mass0[i]
-                elif liquid_weight_sum > 0:
-                    # If both segments have liquid, use averaging
-                    rhoL0_face[i] = (rhoL0[i] + rhoL0[i + 1]) / 2
-                    muL0_face[i] = (muL0[i] + muL0[i + 1]) / 2
-
-                    xL_mass0_face[i] = (
-                        xL_mass0[i] * rhoL0[i] * sL0[i]
-                        + xL_mass0[i + 1] * rhoL0[i + 1] * sL0[i + 1]
-                    ) / liquid_weight_sum
-                else:
-                    rhoL0_face[i] = 0.0
-                    muL0_face[i] = 0.0
-                    xL_mass0_face[i] = 0.0
+            rhoG0_face, muG0_face, xG_mass0_face = _average_phase_properties(
+                sG0, rhoG0, muG0, xG_mass0, False
+            )
+            rhoL0_face, muL0_face, xL_mass0_face = _average_phase_properties(
+                sL0, rhoL0, muL0, xL_mass0, True
+            )
 
             if self.exclude_top_control_block_from_velocity:
                 sG0_face[0] = sG0[1]
@@ -1017,52 +950,31 @@ class Pipe:
         sG_face = (sG[:-1] + sG[1:]) / 2
         sL_face = (sL[:-1] + sL[1:]) / 2
         if self.diff_method == "OBL":
-            sG_face_der = (sG_der[:-1, :] + sG_der[1:, :]) / 2
-            sL_face_der = (sL_der[:-1, :] + sL_der[1:, :]) / 2
+            sG_left_der, sG_right_der = self._interface_derivative_blocks(sG_der)
+            sL_left_der, sL_right_der = self._interface_derivative_blocks(sL_der)
+            rhoG_left_der, rhoG_right_der = self._interface_derivative_blocks(rhoG_der)
+            rhoL_left_der, rhoL_right_der = self._interface_derivative_blocks(rhoL_der)
+            sG_face_der = (sG_left_der + sG_right_der) / 2
+            sL_face_der = (sL_left_der + sL_right_der) / 2
 
-        # Initialize arrays to store interface properties
-        rhoG_face = np.zeros(num_segments - 1)
-        rhoL_face = np.zeros(num_segments - 1)
+        gas_from_right = sG[:-1] == 0
+        gas_from_left = ~gas_from_right & (sG[1:] == 0)
+        liquid_from_right = sL[:-1] == 0
+        liquid_from_left = ~liquid_from_right & (sL[1:] == 0)
+        rhoG_face = (rhoG[:-1] + rhoG[1:]) / 2
+        rhoL_face = (rhoL[:-1] + rhoL[1:]) / 2
+        rhoG_face[gas_from_right] = rhoG[1:][gas_from_right]
+        rhoG_face[gas_from_left] = rhoG[:-1][gas_from_left]
+        rhoL_face[liquid_from_right] = rhoL[1:][liquid_from_right]
+        rhoL_face[liquid_from_left] = rhoL[:-1][liquid_from_left]
 
         if self.diff_method == "OBL":
-            rhoG_face_der = np.zeros((num_interfaces, num_segments * n_vars))
-            rhoL_face_der = np.zeros((num_interfaces, num_segments * n_vars))
-
-        # Compute interface values using conditional averaging
-        for i in range(num_interfaces):
-            if sG[i] == 0:
-                # If no gas in segment i, use properties from segment i+1
-                rhoG_face[i] = rhoG[i + 1]
-                if self.diff_method == "OBL":
-                    rhoG_face_der[i, :] = rhoG_der[i + 1, :]
-            elif sG[i + 1] == 0:
-                # If no gas in segment i+1, use properties from segment i
-                rhoG_face[i] = rhoG[i]
-                if self.diff_method == "OBL":
-                    rhoG_face_der[i, :] = rhoG_der[i, :]
-            else:
-                # If both segments have gas, use averaging
-                rhoG_face[i] = (rhoG[i] + rhoG[i + 1]) / 2
-
-                if self.diff_method == "OBL":
-                    rhoG_face_der[i, :] = (rhoG_der[i, :] + rhoG_der[i + 1, :]) / 2
-
-            if sL[i] == 0:
-                # If no liquid in segment i, use properties from segment i+1
-                rhoL_face[i] = rhoL[i + 1]
-                if self.diff_method == "OBL":
-                    rhoL_face_der[i, :] = rhoL_der[i + 1, :]
-            elif sL[i + 1] == 0:
-                # If no liquid in segment i+1, use properties from segment i
-                rhoL_face[i] = rhoL[i]
-                if self.diff_method == "OBL":
-                    rhoL_face_der[i, :] = rhoL_der[i, :]
-            else:
-                # If both segments have liquid, use averaging
-                rhoL_face[i] = (rhoL[i] + rhoL[i + 1]) / 2
-
-                if self.diff_method == "OBL":
-                    rhoL_face_der[i, :] = (rhoL_der[i, :] + rhoL_der[i + 1, :]) / 2
+            rhoG_face_der = (rhoG_left_der + rhoG_right_der) / 2
+            rhoL_face_der = (rhoL_left_der + rhoL_right_der) / 2
+            rhoG_face_der[gas_from_right] = rhoG_right_der[gas_from_right]
+            rhoG_face_der[gas_from_left] = rhoG_left_der[gas_from_left]
+            rhoL_face_der[liquid_from_right] = rhoL_right_der[liquid_from_right]
+            rhoL_face_der[liquid_from_left] = rhoL_left_der[liquid_from_left]
 
         if self.exclude_top_control_block_from_velocity:
             sG_face[0] = sG[1]
@@ -1070,10 +982,10 @@ class Pipe:
             rhoG_face[0] = rhoG[1]
             rhoL_face[0] = rhoL[1]
             if self.diff_method == "OBL":
-                sG_face_der[0, :] = sG_der[1, :]
-                sL_face_der[0, :] = sL_der[1, :]
-                rhoG_face_der[0, :] = rhoG_der[1, :]
-                rhoL_face_der[0, :] = rhoL_der[1, :]
+                sG_face_der[0, :] = sG_right_der[0, :]
+                sL_face_der[0, :] = sL_right_der[0, :]
+                rhoG_face_der[0, :] = rhoG_right_der[0, :]
+                rhoL_face_der[0, :] = rhoL_right_der[0, :]
 
         self.iter_phases_props_face = [sG_face, sL_face, rhoG_face, rhoL_face]
         if self.diff_method == "OBL":
@@ -1103,9 +1015,8 @@ class Pipe:
         p_m = p[:-1]
         p_p = p[1:]
         if self.diff_method == "OBL":
-            p_der = self.get_op_der_matrix(op_idx=PRES_OP) * 1e5
-            p_m_der = p_der[0:-1:1, :]
-            p_p_der = p_der[1::1, :]
+            p_der = self._get_local_op_derivatives(op_idx=PRES_OP) * 1e5
+            p_m_der, p_p_der = self._interface_derivative_blocks(p_der)
 
         self.calc_mixture_densities(iter_counter, flag)
 
@@ -1259,90 +1170,27 @@ class Pipe:
             else:
                 self.vD0 = np.zeros(num_interfaces)
 
-        # If the differentiation method is OBL, preallocate derivative matrices
         if self.diff_method == "OBL":
-            self.vG_der = np.zeros((num_interfaces, num_segments * n_vars))
-            self.vL_der = np.zeros((num_interfaces, num_segments * n_vars))
-
-        # Gas velocity at wellbore interfaces
-        # self.vG = self.C00 * self.rhoM_vM / self.rhoM_adjusted_face + rhoL_face * self.vD0 / self.rhoM_adjusted_face
-        self.vG = np.zeros(num_interfaces)
-        for i in range(num_interfaces):
-            if sG_face[i] != 0:
-                self.vG[i] = (
-                    self.C00[i] * self.rhoM_vM[i] / self.rhoM_adjusted_face[i]
-                    + rhoL_face[i] * self.vD0[i] / self.rhoM_adjusted_face[i]
-                )
-
-                if self.diff_method == "OBL":
-                    self.vG_der[i, :] = self.C00[i] * (
-                        self.rhoM_vM_der[i, :] * self.rhoM_adjusted_face[i]
-                        - self.rhoM_adjusted_face_der[i, :] * self.rhoM_vM[i]
-                    ) / (self.rhoM_adjusted_face[i] ** 2) + self.vD0[i] * (
-                        rhoL_face_der[i, :] * self.rhoM_adjusted_face[i]
-                        - self.rhoM_adjusted_face_der[i, :] * rhoL_face[i]
-                    ) / (self.rhoM_adjusted_face[i] ** 2)
-
-        # Liquid velocity at wellbore interfaces
-        self.vL = np.zeros(num_interfaces)
-        for i in range(num_interfaces):
-            if sL_face[i] > 0:
-                self.vL[i] = (1 - self.C00[i] * sG_face[i]) * self.rhoM_vM[i] / (
-                    sL_face[i] * self.rhoM_adjusted_face[i]
-                ) - sG_face[i] * rhoG_face[i] * self.vD0[i] / (
-                    sL_face[i] * self.rhoM_adjusted_face[i]
-                )
-
-                if self.diff_method == "OBL":
-                    self.vL_der[i, :] = (
-                        (
-                            -self.C00[i] * sG_face_der[i, :] * self.rhoM_vM[i]
-                            + (1 - self.C00[i] * sG_face[i]) * self.rhoM_vM_der[i, :]
-                        )
-                        * sL_face[i]
-                        * self.rhoM_adjusted_face[i]
-                        - (
-                            sL_face_der[i, :] * self.rhoM_adjusted_face[i]
-                            + sL_face[i] * self.rhoM_adjusted_face_der[i, :]
-                        )
-                        * (1 - self.C00[i] * sG_face[i])
-                        * self.rhoM_vM[i]
-                    ) / ((sL_face[i] * self.rhoM_adjusted_face[i]) ** 2) - (
-                        (
-                            self.vD0[i]
-                            * (
-                                sG_face_der[i, :] * rhoG_face[i]
-                                + sG_face[i] * rhoG_face_der[i, :]
-                            )
-                        )
-                        * (sL_face[i] * self.rhoM_adjusted_face[i])
-                        - (
-                            sL_face_der[i, :] * self.rhoM_adjusted_face[i]
-                            + sL_face[i] * self.rhoM_adjusted_face_der[i, :]
-                        )
-                        * sG_face[i]
-                        * rhoG_face[i]
-                        * self.vD0[i]
-                    ) / ((sL_face[i] * self.rhoM_adjusted_face[i]) ** 2)
-
-        for i in range(num_interfaces):
-            if self.vG[i] > 0 and sG[i] == 0:
-                self.vG[i] = 0
-                if self.diff_method == "OBL":
-                    self.vG_der[i, :] = 0
-            elif self.vG[i] < 0 and sG[i + 1] == 0:
-                self.vG[i] = 0
-                if self.diff_method == "OBL":
-                    self.vG_der[i, :] = 0
-
-            if self.vL[i] > 0 and sL[i] == 0:
-                self.vL[i] = 0
-                if self.diff_method == "OBL":
-                    self.vL_der[i, :] = 0
-            elif self.vL[i] < 0 and sL[i + 1] == 0:
-                self.vL[i] = 0
-                if self.diff_method == "OBL":
-                    self.vL_der[i, :] = 0
+            derivatives = (
+                sG_face_der,
+                sL_face_der,
+                rhoG_face_der,
+                rhoL_face_der,
+                self.rhoM_vM_der,
+                self.rhoM_adjusted_face_der,
+            )
+        else:
+            empty = np.empty((num_interfaces, 0))
+            derivatives = (empty,) * 6
+        self.vG, self.vL, vG_der, vL_der = _phase_velocity_kernel(
+            (sG, sL),
+            (sG_face, sL_face, rhoG_face, rhoL_face),
+            (self.C00, self.rhoM_vM, self.rhoM_adjusted_face, self.vD0),
+            derivatives,
+            self.diff_method == "OBL",
+        )
+        if self.diff_method == "OBL":
+            self.vG_der, self.vL_der = vG_der, vL_der
 
         # Concatenate phase velocities and convert m/s to m/day
         phase_vels = np.concatenate((self.vG * 24 * 60 * 60, self.vL * 24 * 60 * 60))
@@ -1459,6 +1307,15 @@ class Pipe:
 
         initial_guess = 0.005
         relative_roughness = geom.wall_roughness / geom.pipe_ID
+        # A positive inverse-square-root Colebrook solution requires roughness/D < 3.7065.
+        if 0 <= relative_roughness < 3.7065:
+            factors = _colebrook_fanning(Re0[turb_idx], relative_roughness)
+            # This cutoff preserves fsolve's low-friction convergence behavior;
+            # it is not a boundary between laminar and turbulent flow.
+            use_compiled = factors >= 0.0025
+            self.ff0[turb_idx[use_compiled]] = factors[use_compiled]
+            # Only interfaces not assigned a compiled factor reach the scalar loop.
+            turb_idx = turb_idx[~use_compiled]
         for i in turb_idx:
             # Colebrook-White correlation (implicit method)
             self.ff0[i] = fsolve(
@@ -2224,12 +2081,15 @@ class Pipe:
             vel_der_matrix_L = self.vL_der
 
         # Extract the dense matrix of phase velocity derivatives
-        vel_der_dense_G = vel_der_matrix_G[
-            self.conn_row_idx, self.conn_local_col_idx
-        ].astype(np.float64, copy=False)
-        vel_der_dense_L = vel_der_matrix_L[
-            self.conn_row_idx, self.conn_local_col_idx
-        ].astype(np.float64, copy=False)
+        if self.diff_method == "numerical":
+            vel_der_matrix_G = vel_der_matrix_G[
+                self.conn_row_idx, self.conn_local_col_idx
+            ]
+            vel_der_matrix_L = vel_der_matrix_L[
+                self.conn_row_idx, self.conn_local_col_idx
+            ]
+        vel_der_dense_G = vel_der_matrix_G.astype(np.float64, copy=False)
+        vel_der_dense_L = vel_der_matrix_L.astype(np.float64, copy=False)
 
         # Process phase velocities for two- and three-phase flow
         vG, vL = phase_vels[:n_conns], phase_vels[n_conns:]
@@ -2255,36 +2115,49 @@ class Pipe:
 
         return phase_vels, phase_vels_ders
 
-    def get_op_der_matrix(self, op_idx):
+    def _get_local_op_derivatives(self, op_idx: int) -> np.ndarray:
         """
-        Extract the derivative matrix of the specified operator for the well. This operator derivative
-        matrix is used for differentiating phase velocities using the OBL approach.
+        Return each segment's operator derivatives with respect to its own state.
 
-        :param op_idx: Index of the desired operator
-        :type op_idx: int
+        The engine stores derivatives for all mesh blocks. Slice the contiguous
+        blocks of this well, starting at its well-head block, without expanding
+        them into a full-well Jacobian. The result is a view of the engine array.
 
-        Returns
-        der : ndarray, shape (num_segments, num_segments * n_vars)
+        :param op_idx: Operator index in the engine's per-block operator array.
+        :return: Array of shape (num_segments, n_vars). Entry (i, j) is the
+            derivative of operator op_idx in segment i with respect to that
+            segment's primary variable j.
         """
         n = self.geometry.num_segments
-        n_vars = self.physics.n_vars
-        n_ops = self.physics.n_ops
-        n_all_cells = self.reservoir.mesh.n_blocks
-
         well_obj = self.reservoir.get_well(self.name)
         start = well_obj.well_head_idx
-        stop = well_obj.well_head_idx + n
+        arr = np.asarray(self.physics.engine.op_ders_arr).reshape(
+            self.reservoir.mesh.n_blocks, self.physics.n_ops, self.physics.n_vars
+        )
+        return arr[start : start + n, op_idx, :]
 
-        op_ders_arr = np.asarray(self.physics.engine.op_ders_arr)
-        arr = op_ders_arr.reshape(n_all_cells, n_ops, n_vars)
+    def _interface_derivative_blocks(
+        self, local: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """
+        Place segment derivatives into the left and right blocks of each interface.
 
-        # (n, n_vars): derivative values for segments of this well, for this operator
-        local = arr[start:stop, op_idx, :]
+        At interface i, the first n_vars columns belong to segment i and the
+        last n_vars columns to segment i + 1. Columns belonging to the other
+        segment are zero in each returned array, so the arrays can be combined
+        to differentiate interface averages and side-selection rules.
 
-        der = np.zeros((n, n, n_vars), dtype=local.dtype)
-        idx = np.arange(n)
-        der[idx, idx, :] = local
-        return der.reshape(n, n * n_vars)
+        :param local: Segment derivatives of shape (num_segments, n_vars).
+        :return: Tuple (left, right), each with shape (num_interfaces, 2 * n_vars).
+            left[i, :n_vars] contains local[i]; right[i, n_vars:] contains
+            local[i + 1]. All remaining entries are zero.
+        """
+        n_vars = self.physics.n_vars
+        left = np.zeros((self.geometry.num_interfaces, 2 * n_vars), dtype=local.dtype)
+        right = np.zeros_like(left)
+        left[:, :n_vars] = local[:-1]
+        right[:, n_vars:] = local[1:]
+        return left, right
 
     def differentiate_phase_vels_with_perturb(
         self, phase_vels, Xn_dfm_well, X_dfm_well, dt, simulation_time, iter_counter
