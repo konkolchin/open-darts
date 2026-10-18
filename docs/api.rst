@@ -169,6 +169,12 @@ Models
    :show-inheritance:
    :special-members: __init__
 
+.. autoclass:: darts.models.dfm_model.DFMWellModel
+   :members:
+   :undoc-members:
+   :show-inheritance:
+   :special-members: __init__
+
 Output
 ######
 .. autoclass:: darts.models.output.Output

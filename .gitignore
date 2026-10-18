@@ -23,11 +23,9 @@ thirdparty/install
 
 # cache
 docs/_build
-**/.cache
-**/__pycache__/
-darts/__pycache__/
-models/__pycache__/
 **/.cache/
+**/__pycache__/
+*.fastcache
 
 # building info
 darts/build_info.txt
@@ -35,37 +33,46 @@ darts/build_info.txt
 # authoritative CHANGELOG.md is the one in the repository root
 darts/CHANGELOG.md
 
-# simulation results
-results_*/**
-solution.pvd
+# IDE/editor files
+.vscode
+/.idea/*
+*.vim
 
+# Build artifacts
 *.exp
-*.png
-*.xlsx
-*.pkl
-*.fastcache
 *.iobj
 *.ipdb
 *.lib
 *.pdb
-*.npy
-.vscode
-/.idea/*
 *x64*
+
+# Logs
 *.log
-*.nc
+
+# Simulation results
+results_*/**
 *.h5
-*.vim
+*.nc
+*.npy
+*.pkl
+*.png
+*.xlsx
+
+# Generated VTK/ParaView output files
+*.pvd
+*.vtk
+*.vtp
+*.vtu
+
+# Generated solver output
 *.sol
 *.csr
 *.rhs
-*.vtu
-*.vtk
-*.txt
-*.pvd
-*.vtp
 
-# container images and the staging context build_runtime_image.sh creates
+# Generated text output
+*.txt
+
+# Container images and the staging context build_runtime_image.sh creates
 *.sif
 .cicd/build-linux/.context/
 .wheelbuild-env/
