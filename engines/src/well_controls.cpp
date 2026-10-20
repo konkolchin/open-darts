@@ -210,9 +210,10 @@ int well_control_iface::check_constraint_violation(value_t dt, index_t well_head
 		well_ctrl_etor->evaluate(state, well_ctrl_ops);
 		index_t pres_op_idx = get_pres_ctrl_op_idx();
 
-		return (p_diff > 0.) ?
-			well_ctrl_ops[pres_op_idx] > this->target : // injection well
-		well_ctrl_ops[pres_op_idx] < this->target;  // production well
+		// Report a violation above the target BHP for injectors or below it for producers.
+		const bool is_injection = (this->well_state_offset == 0);
+		const value_t pressure = well_ctrl_ops[pres_op_idx];
+		return is_injection ? pressure > this->target : pressure < this->target;
 	}
 	else
 	{
