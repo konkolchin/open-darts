@@ -2,6 +2,7 @@
 set -euo pipefail
 
 # Run this script from the repository root that contains pkl_* dirs and the models/ directory.
+# Without --sources it copies from local pkl_* dirs, one per CI lane (see src_dirs below).
 # Usage:
 #   helper_scripts/replace_pkls.sh --models MODEL [MODEL ...] [--sources ARTIFACT_ZIP ...]
 # Where each ARTIFACT_ZIP is a GitLab CI artifacts zip that contains
@@ -72,17 +73,38 @@ if [[ ! -d "$models_dir" ]]; then
   exit 1
 fi
 
-# Copy order
-src_dirs=( "pkl_lin" "pkl_lin_odls" "pkl_win_odls" "pkl_win" "pkl_gpu" )
+# Copy order. Each local dir holds the extracted archive of one CI lane and is named
+# after that lane's reference suffix: pkl_lin / pkl_win (open-source solvers, no suffix),
+# pkl_lin_iter / pkl_win_iter (proprietary iterative solvers), pkl_gpu.
+src_dirs=( "pkl_lin" "pkl_win" "pkl_lin_iter" "pkl_win_iter" "pkl_gpu" )
 
-# Map source dir -> expected filename
-declare -A src_file=(
-  ["pkl_lin"]="perf_lin_iter.pkl"
-  ["pkl_lin_odls"]="perf_lin_odls.pkl"
-  ["pkl_win_odls"]="perf_win_odls.pkl"
-  ["pkl_win"]="perf_win_iter.pkl"
-  ["pkl_gpu"]="perf_lin_gpu.pkl"
+# Map source dir -> reference name stem: perf_<stem>[_<case>].pkl, well_time_data_<stem>[_<case>].pkl
+declare -A src_stem=(
+  ["pkl_lin"]="lin"
+  ["pkl_win"]="win"
+  ["pkl_lin_iter"]="lin_iter"
+  ["pkl_win_iter"]="win_iter"
+  ["pkl_gpu"]="lin_gpu"
 )
+
+# Print the lane's reference files in a model ref dir, one per line. The unsuffixed
+# stems (lin, win) also match the _iter/_gpu files of the same OS; those are skipped.
+lane_files() {
+  local ref_dir="$1" stem="$2" f name
+  for f in "$ref_dir"/perf_"$stem"*.pkl "$ref_dir"/well_time_data_"$stem"*.pkl; do
+    [[ -f "$f" ]] || continue
+    name="${f##*/}"
+    name="${name#perf_}"
+    name="${name#well_time_data_}"
+    name="${name%.pkl}"
+    # keep <stem> and <stem>_<case>; drop e.g. linfoo
+    [[ "$name" == "$stem" || "$name" == "$stem"_* ]] || continue
+    if [[ "$stem" == lin || "$stem" == win ]]; then
+      [[ "$name" == "$stem"_iter* || "$name" == "$stem"_gpu* ]] && continue
+    fi
+    echo "$f"
+  done
+}
 
 require_cmd() {
   local cmd="$1"
@@ -100,13 +122,15 @@ copy_from_root() {
     mkdir -p "$dest"
 
     for subdir in "${src_dirs[@]}"; do
+      local stem="${src_stem[$subdir]}"
       local copied=false
+      local files=()
       # Prefer direct path first
       local direct_dir="${root_dir}/${subdir}"
       if [[ -d "$direct_dir" ]]; then
-        local src="${direct_dir}/${model}/ref/${src_file[$subdir]}"
-        if [[ -f "$src" ]]; then
-          cp -v "$src" "$dest"/
+        mapfile -t files < <(lane_files "${direct_dir}/${model}/ref" "$stem")
+        if [[ ${#files[@]} -gt 0 ]]; then
+          cp -v -- "${files[@]}" "$dest"/
           copied=true
         fi
       fi
@@ -115,16 +139,16 @@ copy_from_root() {
       if [[ "$copied" == false ]]; then
         mapfile -t candidate_dirs < <(find "$root_dir" -type d -name "$subdir" -print 2>/dev/null || true)
         for cdir in "${candidate_dirs[@]}"; do
-          local src2="${cdir}/${model}/ref/${src_file[$subdir]}"
-          if [[ -f "$src2" ]]; then
-            cp -v "$src2" "$dest"/
+          mapfile -t files < <(lane_files "${cdir}/${model}/ref" "$stem")
+          if [[ ${#files[@]} -gt 0 ]]; then
+            cp -v -- "${files[@]}" "$dest"/
             copied=true
             # don't break; allow later zips/specs to overwrite with newer files
           fi
         done
       fi
       if [[ "$copied" == false ]]; then
-        echo "WARN: missing ${subdir}/${model}/ref/${src_file[$subdir]} under $root_dir" >&2
+        echo "WARN: no perf_${stem}*.pkl / well_time_data_${stem}*.pkl in ${subdir}/${model}/ref under $root_dir" >&2
       fi
     done
   done

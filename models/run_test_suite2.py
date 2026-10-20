@@ -254,16 +254,17 @@ def run_testing(platform, overwrite, heavy_models, test_all_models):
         failed_well_time_series = 0
         n_well_time_series = 0
         skipped_well_time_series = False
-        if not rcode:
-            with open(stdout_path, 'a') as stdout_file:
-                print('\nWell time-series comparison:', file=stdout_file)
-                with redirect_stdout(stdout_file):
-                    failed_well_time_series, n_well_time_series, skipped_well_time_series = compare_generated_well_time_series(
-                        model_path,
-                        well_time_series_snapshot,
-                        overwrite=overwrite,
-                        pkl_suffix=_pkl_suffix(),
-                    )
+        # done even when main.py failed (e.g. a changed perf reference), so that an UPLOAD_PKL=1
+        # run still refreshes the well time-series reference; only files this run wrote are compared
+        with open(stdout_path, 'a') as stdout_file:
+            print('\nWell time-series comparison:', file=stdout_file)
+            with redirect_stdout(stdout_file):
+                failed_well_time_series, n_well_time_series, skipped_well_time_series = compare_generated_well_time_series(
+                    model_path,
+                    well_time_series_snapshot,
+                    overwrite=overwrite,
+                    pkl_suffix=_pkl_suffix(),
+                )
         if not rcode and not failed_well_time_series:
             if skipped_well_time_series:
                 print('OK (main.py ran without errors; well time-series comparison skipped for multithread run)')

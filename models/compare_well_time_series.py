@@ -11,12 +11,15 @@ WELL_TIME_SERIES_REFERENCE_ROWS = 20
 def get_pkl_suffix():
     """
     Return the solver/platform suffix used for well time-series reference files.
+
+    The open-source CPU lane has no suffix (``well_time_data_lin.pkl``); the GPU and the
+    proprietary iterative-solver lanes keep ``_gpu`` / ``_iter``.
     """
     if os.getenv("TEST_GPU") == "1":
         return "_gpu"
     if os.getenv("ODLS") == "-a":
         return "_iter"
-    return "_odls"
+    return ""
 
 
 def create_well_time_series_snapshot(root_dir: str):

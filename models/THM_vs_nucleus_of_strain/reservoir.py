@@ -425,6 +425,7 @@ class UnstructReservoirCustom(UnstructReservoirMech):
         self.cs = idata.rock.compressibility
 
         self.hcap = np.zeros(self.n_matrix + self.n_fracs)
+        self.hcap[:self.n_matrix] = idata.rock.heat_capacity
         for i, cell_id in enumerate(range(self.discr_mesh.region_ranges[elem_loc.MATRIX][0],
                                           self.discr_mesh.region_ranges[elem_loc.MATRIX][1])):
             #permx = idata.rock.permx[3 * cell_id]

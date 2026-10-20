@@ -52,8 +52,6 @@ def check_performance_local(m, case):
         pkl_suffix = '_gpu'
     elif os.getenv('ODLS') != None and os.getenv('ODLS') == '-a':
         pkl_suffix = '_iter'
-    else:
-        pkl_suffix = '_odls'
     print('pkl_suffix=', pkl_suffix)
 
     file_name = os.path.join('ref', 'perf_' + platform.system().lower()[:3] + pkl_suffix + '_' + case + '.pkl')

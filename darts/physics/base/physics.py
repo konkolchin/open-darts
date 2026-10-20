@@ -10,6 +10,7 @@ from functools import total_ordering
 from typing import Any
 
 import numpy as np
+from scipy.interpolate import interp1d
 
 from darts.engines import *
 from darts.interpolators import *
@@ -21,7 +22,6 @@ from darts.physics.base.operator_evaluator import (
     WellCtrlOperators,
     WellOperators,
 )
-from darts.tools.interpolation import linear_interp_extrapolate
 from darts.tools.obl_cache import OblCacheCodec
 
 
@@ -941,22 +941,32 @@ class PhysicsBase:
         for ith_var, variable in enumerate(self.vars):
             if variable == "enthalpy" and "enthalpy" not in input_distribution.keys():
                 # Temperature was provided; interpolate P and T to compute enthalpies
-                pressure = linear_interp_extrapolate(
-                    depths, input_depth, input_distribution["pressure"]
+                p_itor = interp1d(
+                    input_depth,
+                    input_distribution["pressure"],
+                    kind="linear",
+                    fill_value="extrapolate",
                 )
+                pressure = p_itor(depths)
 
-                temperature = linear_interp_extrapolate(
-                    depths, input_depth, input_distribution["temperature"]
+                t_itor = interp1d(
+                    input_depth,
+                    input_distribution["temperature"],
+                    kind="linear",
+                    fill_value="extrapolate",
                 )
+                temperature = t_itor(depths)
 
-                zi = np.array(
-                    [
-                        linear_interp_extrapolate(
-                            depths, input_depth, input_distribution[comp]
-                        )
-                        for comp in self.components[:-1]
-                    ]
-                )
+                z_itors = [
+                    interp1d(
+                        input_depth,
+                        input_distribution[comp],
+                        kind="linear",
+                        fill_value="extrapolate",
+                    )
+                    for comp in self.components[:-1]
+                ]
+                zi = np.array([z_itor(depths) for z_itor in z_itors])
 
                 values = np.empty(mesh.n_res_blocks)
                 for j in range(mesh.n_res_blocks):
@@ -969,9 +979,13 @@ class PhysicsBase:
                     )
             else:
                 # Interpolate primary variable directly
-                values = linear_interp_extrapolate(
-                    depths, input_depth, input_distribution[variable]
+                itor = interp1d(
+                    input_depth,
+                    input_distribution[variable],
+                    kind="linear",
+                    fill_value="extrapolate",
                 )
+                values = itor(depths)
 
             values = np.resize(np.asarray(values), mesh.n_res_blocks)
             np.asarray(mesh.initial_state)[ith_var :: self.n_vars] = values
