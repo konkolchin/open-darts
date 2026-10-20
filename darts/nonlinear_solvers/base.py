@@ -150,12 +150,13 @@ class NonlinearSolverSpec:
     :ivar on_linear_nonconvergence: policy for a linear solve that exhausted its
         iteration budget on a *usable* iterate (finite, non-regressing residual;
         the unified ``linear_solver::solve()`` convention reports it as a
-        positive code). ``'accept'`` (default) applies the inexact-Newton step
-        and lets the Newton residual gate decide -- the historical behaviour of
-        the default FGMRES+CPR solver; ``'cut'`` treats it as a failed solve and
-        cuts the timestep -- the historical behaviour of MGR. A hard linear
-        failure (non-finite or growing residual) always cuts, regardless of
-        this policy.
+        positive code). ``'cut'`` (default) treats it as a failed solve and
+        cuts the timestep -- the historical behaviour of MGR; ``'accept'``
+        applies the inexact-Newton step and lets the Newton residual gate
+        decide -- the historical behaviour of FGMRES+CPR, which can drive the
+        state far off (out of the OBL box, into a failing flash) when the solve
+        is poor. A hard linear failure (non-finite or growing residual) always
+        cuts, regardless of this policy.
     """
 
     tolerance: float = 1e-3
@@ -170,7 +171,7 @@ class NonlinearSolverSpec:
     # keyword-only: appending a positional field to this base would shift every
     # positional argument the subclasses inherit (NewtonSpec's `chop` was the
     # 10th), silently rebinding existing call sites.
-    on_linear_nonconvergence: str = field(default="accept", kw_only=True)
+    on_linear_nonconvergence: str = field(default="cut", kw_only=True)
 
     def __post_init__(self):
         self.validate()
@@ -559,9 +560,9 @@ class NonlinearSolver:
             if rc == 3:
                 # Unified solve() convention: the linear solver exhausted its
                 # budget on a USABLE iterate (finite, non-regressing residual).
-                # Count and mark it, then apply the spec policy: 'accept'
-                # (default) takes the inexact-Newton step and lets the Newton
-                # residual gate decide; 'cut' fails the step like a hard error.
+                # Count and mark it, then apply the spec policy: 'cut'
+                # (default) fails the step like a hard error; 'accept' takes the
+                # inexact-Newton step and lets the Newton residual gate decide.
                 status.n_linear_nonconverged += 1
                 nc_marker = " NC"
             write_to_log(
