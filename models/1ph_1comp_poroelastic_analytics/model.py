@@ -76,6 +76,10 @@ class Model(THMCModel):
             proprietary_linear_type=sim_params.cpu_gmres_fs_cpr,
         )
         super().set_solver()
+        # These tolerances sit at the round-off floor of FGMRES: a solve can stall just
+        # above it on an accurate iterate, and a smaller dt does not lower that floor,
+        # so cutting the timestep would only drive dt down without advancing.
+        self.nonlinear_solver.spec.on_linear_nonconvergence = 'accept'
 
     def set_reservoir(self):
         self.reservoir = UnstructReservoirCustom(timer=self.timer, idata=self.idata, case=self.case,

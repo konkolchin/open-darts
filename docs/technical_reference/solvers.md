@@ -78,7 +78,7 @@ The nonlinear default is a `NewtonSolver` with:
 | `norm` | `Norm.L2` | residual norm |
 | `coupled_well_res_norm_method` | `1` | DFM coupled well-residual norm (`1` or `2`) |
 | `chop` | `ChopSpec(mode='local', factor=0.1, log_transform=False)` | update limiting; `mode` is `'local'`, `'global'` or `None`, `factor` is the max composition change per iteration |
-| `on_linear_nonconvergence` | `'accept'` | policy for a linear solve that exhausted its budget on a usable iterate: `'accept'` the inexact-Newton step or `'cut'` the timestep (see below) |
+| `on_linear_nonconvergence` | `'cut'` | policy for a linear solve that exhausted its budget on a usable iterate: `'cut'` the timestep or `'accept'` the inexact-Newton step (see below) |
 | `obl_bounds` | `OBLBoundsSpec(mode=None)` | optional per-axis clamping to the OBL box; `mode='obl_axes'` with `axis_min` / `axis_max` |
 | `max_residual` | `None` | divergence guard: fail the step when the reservoir residual exceeds this absolute value (see below) |
 | `max_residual_growth` | `None` | divergence guard: fail the step when the residual exceeds this factor × the smallest residual of the timestep so far |
@@ -99,14 +99,16 @@ iteration and cuts the timestep. What happens on a *usable but non-converged* so
 nonlinear-solver policy, not the linear solver's decision:
 
 ```python
-self.nonlinear_solver.spec.on_linear_nonconvergence = 'accept'   # default
-self.nonlinear_solver.spec.on_linear_nonconvergence = 'cut'
+self.nonlinear_solver.spec.on_linear_nonconvergence = 'cut'      # default
+self.nonlinear_solver.spec.on_linear_nonconvergence = 'accept'
 ```
 
 `'accept'` applies the inexact-Newton step and lets the Newton residual gate decide —
 the classical inexact-Newton treatment and the historical behaviour of the default
 FGMRES+CPR solver. `'cut'` treats it as a failed solve and cuts the timestep — the
-historical behaviour of MGR. With one policy in force, different linear solvers run the
+historical behaviour of MGR, and the default: an inexact step from a poor solve can push
+cells out of the OBL box or into a state where a PH flash fails, which ends a run that a
+cut timestep would have carried on. With one policy in force, different linear solvers run the
 same Newton trajectory on the same problem, which makes solver comparisons
 like-for-like. Non-converged solves are marked ` NC` in the per-iteration log line and
 counted in `nonlinear_solver.status.n_linear_nonconverged`.
@@ -283,8 +285,9 @@ rows carry a negative diagonal, and `cond_1(A_pp)` is 1.3e13 against 4.0e9.
 The V-cycle then diverges, and it does so **silently**: HYPRE returns no error
 and the vector is finite, just enormous — one apply amplifies the RHS by ~1.6e17.
 FGMRES stalls at relative residual 1.0, reports "budget exhausted, residual did
-not regress", and the default `on_linear_nonconvergence='accept'` policy applies
-the step, so the Newton loop spins indefinitely.
+not regress", and under `on_linear_nonconvergence='accept'` (the default until
+the policy switched to `'cut'`) the step is applied, so the Newton loop spins
+indefinitely.
 
 `stage_growth_cap` catches this: a stage apply that is non-finite, or that
 exceeds the cap times its own input in max-norm, fails the solve so the

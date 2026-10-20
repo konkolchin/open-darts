@@ -506,7 +506,10 @@ namespace opendarts
       // residual already met the tolerance and no Arnoldi step ran at all.
       n_iters_ = did_arnoldi ? (iter + 1) : 0;
       final_resid_ = (den_norm > 1.0e-12) ? (r_norm / den_norm) : r_norm;
-      last_converged_ = (r_norm <= tol_scaled);
+      // An absolute residual below epsmac is converged as well: the restart loop
+      // stops there (a vanishing RHS, or tol_scaled below machine precision), and
+      // no smaller timestep can push the residual further down.
+      last_converged_ = (r_norm <= tol_scaled || r_norm < epsmac);
       // Unified solve() convention (see linear_solver.hpp):
       //   hard failure (negative) when the iterate is unusable -- a non-finite
       //   residual (NaN/Inf out of the preconditioner or the matrix), or a
