@@ -71,6 +71,7 @@ results_*/**
 
 # Generated text output
 *.txt
+!.cicd/constraints.txt
 
 # Container images and the staging context build_runtime_image.sh creates
 *.sif

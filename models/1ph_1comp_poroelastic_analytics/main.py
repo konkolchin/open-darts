@@ -30,7 +30,7 @@ except:
 
 def _pkl_suffix():
     '''
-    Solver/platform suffix of the reference files: '_odls' / '_iter' / '_gpu'.
+    Solver/platform suffix of the reference files: '' (open-source CPU) / '_iter' / '_gpu'.
     Shares the suite-wide helper, as SPE10_mech does, so the name matches the tracked references;
     with another suffix the test finds no reference and compares nothing.
     Falls back to the same rule when main.py
@@ -45,7 +45,7 @@ def _pkl_suffix():
     except ImportError:
         if os.getenv('TEST_GPU') == '1':
             return '_gpu'
-        return '_iter' if os.getenv('ODLS') == '-a' else '_odls'
+        return '_iter' if os.getenv('ODLS') == '-a' else ''
 
 def generate_mesh(mesh='rect'):
     '''
@@ -207,7 +207,7 @@ def test(case='mandel', discr_name='mech_discretizer', mesh='rect', overwrite='0
     # m.print_timers()
 
     if is_plk_exist:
-        return (failed > 0), data[-1]['simulation time']
+        return (failed > 0), m.timer.node['simulation'].get_timer()
     else:
         return False, -1.0
 def run_and_plot(case='mandel', discretizer='mech_discretizer', mesh='rect', convergence_analysis=False):

@@ -43,6 +43,9 @@ variables:
   # Marking an MR ready does not start a pipeline by itself: play the manual build-linux-valgrind job
   # in the existing pipeline, or push a commit / run a new pipeline to also get test_all_models.
   MR_NON_DRAFT: "0"
+  # pip reads PIP_CONSTRAINT as `-c`: every pip install in CI resolves within these exact
+  # versions, which the reference results depend on, while pyproject.toml leaves them open for users.
+  PIP_CONSTRAINT: "${CI_PROJECT_DIR}/.cicd/constraints.txt"
   # Model testbench (https://gitlab.com/open-darts/testbench) in the GPU runtime image, see .cicd/jobs/testbench.yml.
   #   "0" (default) -> not run
   #   "1" -> trigger-testbench starts a testbench pipeline that runs the variants of TESTBENCH_MODELS (empty: all

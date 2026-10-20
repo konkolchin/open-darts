@@ -812,10 +812,10 @@ def run_ref_checks(cases=REF_CHECK_CASES):
         # only the files this case writes are compared, so snapshot before it runs
         snapshot = create_well_time_series_snapshot(BASE_DIR)
         failed, t = run_test(list(args))
-        if not failed:
-            failed_pkl, _, _ = compare_generated_well_time_series(
-                BASE_DIR, snapshot, overwrite=overwrite, pkl_suffix=get_pkl_suffix())
-            failed += failed_pkl
+        # compared even when the vtk check failed, as in the suite, so UPLOAD_PKL=1 refreshes both
+        failed_pkl, _, _ = compare_generated_well_time_series(
+            BASE_DIR, snapshot, overwrite=overwrite, pkl_suffix=get_pkl_suffix())
+        failed += failed_pkl
         results.append((args, failed, t))
 
     print('\n' + str_splitter + 'reference check summary (pkl suffix: %s)\n' % get_pkl_suffix() + str_splitter)

@@ -170,7 +170,7 @@ class Model(DartsModel, OptModuleSettings):
                                          'steam': steam_density}
         property_container.viscosity_ev = {'water': MaoDuan2009(components),
                                            'steam': ConstFunc(0.01)}
-        property_container.conductivity_ev = {'water': ConstFunc(172.8),
+        property_container.conductivity_ev = {'water': ConstFunc(52.0),
                                               'steam': ConstFunc(0.)}
         property_container.rel_perm_ev = {'water': PhaseRelPerm("water"),
                                           'steam': PhaseRelPerm("gas")}
@@ -248,7 +248,7 @@ class Model(DartsModel, OptModuleSettings):
         # self.idata.fluid.density['water'] = DensityBasic(compr=1e-5, dens0=1014)
 
         # from darts.physics.properties.basic import ConstFunc
-        # self.idata.fluid.conduction_ev['water'] = ConstFunc(172.8)
+        # self.idata.fluid.conduction_ev['water'] = ConstFunc(52.0)
 
         # if init_type== 'uniform': # uniform initial conditions
         #     self.idata.initial.initial_pressure = 200.  # bars

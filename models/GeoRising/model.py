@@ -188,7 +188,7 @@ class Model(DartsModel):
         }
         pc.conductivity_ev = {
             'V': ConstFunc(0.0),
-            'L': ConstFunc(172.8),                 # kJ/m/day/K, matches geothermal default
+            'L': ConstFunc(52.0),                 # kJ/m/day/K
         }
         # output_props exposes derived T (K) via the property interpolator
         pc.output_props = {'temperature': lambda: pc.temperature}

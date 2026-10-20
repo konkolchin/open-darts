@@ -395,17 +395,8 @@ class THMCModel(DartsModel):
             perf_data['wasted linear iterations'] = (
                 self.nonlinear_solver.stats.n_linear_wasted
             )
-
-            sim = self.timer.node['simulation']
-            jac = sim.node['jacobian assembly']
-            perf_data['simulation time'] = sim.get_timer()
-            perf_data['linearization time'] = jac.get_timer()
-            perf_data['linear solver time'] = (
-                sim.node['linear solver solve'].get_timer()
-                + sim.node['linear solver setup'].get_timer()
-            )
-            interp = jac.node['interpolation']
-            perf_data['interpolation incl. generation time'] = interp.get_timer()
+            # No wall-clock timings: they vary from run to run and would make reference
+            # files differ between runs with identical results. Read them from self.timer.
 
         return perf_data
 
