@@ -259,15 +259,9 @@ class Model(DartsModel):
         # Well controls are derived from the reservoir state (BHP targets, injection temperature). init() calls
         # set_well_controls() before the initial conditions are set, so the controls are applied here, right before
         # the engine is initialized (also on the restart path).
-        self.well_constraints_applied = False
         self.set_well_controls()
+        self.set_well_constraints()
         super().reset()
-
-    def run(self, *args, **kwargs):
-        ret = super().run(*args, **kwargs)
-        if not self.well_constraints_applied:
-            self.set_well_constraints()
-        return ret
 
     def well_is_inj(self, wname : str):  # determine well control by its name
         return "I" in wname
@@ -321,9 +315,6 @@ class Model(DartsModel):
         return 0
 
     def set_well_constraints(self):
-        # The engine tells an injector from a producer in a BHP constraint check by the sign of the well head - well
-        # body pressure difference, which is ~0 until the flow is established. A constraint active from t = 0 can
-        # switch the well to BHP control spuriously, so the constraints are applied after the first run() call.
         wctrl = self.idata.well_data.controls
         for w in self.reservoir.wells:
             if self.well_is_inj(w.name):
@@ -334,7 +325,6 @@ class Model(DartsModel):
             elif wctrl.prod_rate is not None:
                 self.physics.set_well_controls(wctrl=w.constraint, control_type=well_control_iface.BHP,
                                                is_inj=False, target=wctrl.prod_bhp_constraint)
-        self.well_constraints_applied = True
 
     def get_mat_frac_range(self, part):
         # order: fracture, matrix
