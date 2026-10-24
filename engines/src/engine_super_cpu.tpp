@@ -394,7 +394,7 @@ int engine_super_cpu<NC, NP, THERMAL>::assemble_jacobian_array(value_t dt, std::
                         // calculate phase volumetric rate at DFM well connection
                         value_t phase_velocity = phases_vels[p * n_conns + conn_idx];
 
-                        phase_volumetric_rate = wells[0]->well_transmissibility * op_vals_arr[i * N_OPS + SAT_OP + p] * phase_velocity;
+                        phase_volumetric_rate = tran[conn_idx] * op_vals_arr[i * N_OPS + SAT_OP + p] * phase_velocity;
 
                         // get partial derivatives of phase volumetric rate at DFM well connection
                         for (uint8_t v = 0; v < N_VARS; v++)
@@ -407,8 +407,8 @@ int engine_super_cpu<NC, NP, THERMAL>::assemble_jacobian_array(value_t dt, std::
                             phase_velocity_der_i = phases_vels_ders[p * n_conns * vel_der_size + conn_idx * vel_der_size + a + v];
                             phase_velocity_der_j = phases_vels_ders[p * n_conns * vel_der_size + conn_idx * vel_der_size + b + v];
 
-                            phase_vol_rate_der_i[v] = wells[0]->well_transmissibility * (op_ders_arr[(i * N_OPS + SAT_OP + p) * N_VARS + v] * phase_velocity + op_vals_arr[i * N_OPS + SAT_OP + p] * phase_velocity_der_i);
-                            phase_vol_rate_der_j[v] = wells[0]->well_transmissibility * op_vals_arr[i * N_OPS + SAT_OP + p] * phase_velocity_der_j;
+                            phase_vol_rate_der_i[v] = tran[conn_idx] * (op_ders_arr[(i * N_OPS + SAT_OP + p) * N_VARS + v] * phase_velocity + op_vals_arr[i * N_OPS + SAT_OP + p] * phase_velocity_der_i);
+                            phase_vol_rate_der_j[v] = tran[conn_idx] * op_vals_arr[i * N_OPS + SAT_OP + p] * phase_velocity_der_j;
                         }
                     }
                     // mass and energy outflow with effect of gravity and capillarity
@@ -494,7 +494,7 @@ int engine_super_cpu<NC, NP, THERMAL>::assemble_jacobian_array(value_t dt, std::
                         // calculate phase volumetric rate at DFM well connection
                         value_t phase_velocity = phases_vels[p * n_conns + conn_idx];
 
-                        phase_volumetric_rate = wells[0]->well_transmissibility * op_vals_arr[j * N_OPS + SAT_OP + p] * phase_velocity;
+                        phase_volumetric_rate = tran[conn_idx] * op_vals_arr[j * N_OPS + SAT_OP + p] * phase_velocity;
 
                         // get partial derivatives of phase volumetric rate at DFM well connection
                         for (uint8_t v = 0; v < N_VARS; v++)
@@ -507,8 +507,8 @@ int engine_super_cpu<NC, NP, THERMAL>::assemble_jacobian_array(value_t dt, std::
                             phase_velocity_der_i = phases_vels_ders[p * n_conns * vel_der_size + conn_idx * vel_der_size + a + v];
                             phase_velocity_der_j = phases_vels_ders[p * n_conns * vel_der_size + conn_idx * vel_der_size + b + v];
 
-                            phase_vol_rate_der_i[v] = wells[0]->well_transmissibility * op_vals_arr[j * N_OPS + SAT_OP + p] * phase_velocity_der_i;
-                            phase_vol_rate_der_j[v] = wells[0]->well_transmissibility * (op_ders_arr[(j * N_OPS + SAT_OP + p) * N_VARS + v] * phase_velocity + op_vals_arr[j * N_OPS + SAT_OP + p] * phase_velocity_der_j);
+                            phase_vol_rate_der_i[v] = tran[conn_idx] * op_vals_arr[j * N_OPS + SAT_OP + p] * phase_velocity_der_i;
+                            phase_vol_rate_der_j[v] = tran[conn_idx] * (op_ders_arr[(j * N_OPS + SAT_OP + p) * N_VARS + v] * phase_velocity + op_vals_arr[j * N_OPS + SAT_OP + p] * phase_velocity_der_j);
                         }
                     }
                     // mass and energy inflow with effect of gravity and capillarity
