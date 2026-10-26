@@ -19,8 +19,9 @@ Welcome to open-DARTS documentation!
    getting_started/installation.md
    containers/apptainer.md
    getting_started/tutorial.md
+   getting_started/features_overview.md
    getting_started/example_models.md
-   getting_started/supported_features.md
+   getting_started/known_limitations.md
    getting_started/troubleshooting.md
    getting_started/F.A.Q..md
    getting_started/configure_hardware.md
@@ -40,6 +41,7 @@ Welcome to open-DARTS documentation!
    technical_reference/glossary.md
    technical_reference/reservoir.md
    technical_reference/wells.md
+   technical_reference/geomechanics.md
    technical_reference/solvers.md
 
 .. toctree::

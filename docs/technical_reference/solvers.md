@@ -370,11 +370,21 @@ Two specs wrap another solver rather than being one:
   instead of replacing it, call `model.linear_solver.update_solver(...)`, which reconfigures
   the injected solver in place without touching the Jacobian.
 
-So the two families are separated in both directions: HYPRE's MGR cannot serve as a
-preconditioner inside an in-tree Krylov driver (the `ValueError` above), and no in-tree
-component can be substituted into MGR's own cycle. Within a run you may switch between
-registry solvers or retune one, but you cannot hand the solve back and forth between a
-registry solver and a GPU or Python-resident one.
+The open-source version has two types of linear solvers, and they cannot be mixed:
+
+* **HYPRE-based** -- `MGRSolverSpec`: matrix storage, Krylov driver and preconditioner are all HYPRE's.
+* **open-darts implementation** -- every other CPU spec (`GMRESSolverSpec`, `CPRSolverSpec`, `FSCPRSolverSpec`,
+  `SuperLUSolverSpec`, ...): in-tree matrix storage and Krylov drivers. HYPRE BoomerAMG appears here only as the
+  pressure-stage component of CPR / FS-CPR.
+
+Mixing is not supported in either of two ways:
+
+* **In time**: a run cannot switch from a HYPRE solver to an open-darts one and back.
+* **By matrix storage / solver / preconditioner**: e.g. the in-tree GMRES with HYPRE's MGR preconditioner is not
+  supported (the `ValueError` above), nor is an MGR cycle with an in-tree preconditioner.
+
+Choose the family once, in `set_solver()`. Within a family you may retune the current solver with
+`model.linear_solver.update_solver(...)`.
 
 ## Build availability
 
