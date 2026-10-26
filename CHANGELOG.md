@@ -1,4 +1,4 @@
-# #.#.# [Future]
+# 2.1.0 [26-10-2026]
 - **PT evaluation for saturation initialization is now inferred automatically.** `PropertyContainer.compute_saturation(state_pt=None, evaluate_PT_from_PHflash=False)` is now `compute_saturation(state_pt=None)`. When `state_pt` is supplied, PH/PS flash objects automatically use their direct PT evaluation path. **Migration:** `compute_saturation(state, evaluate_PT_from_PHflash=True)` → `compute_saturation(state)`.
 - Add OLGA-style linear IPR support for controlling injectivity/productivity of DFM wells ([!305](https://gitlab.com/open-darts/open-darts/-/merge_requests/305))
 - Add `AirViscositySutherland` to `darts/physics/properties/viscosity.py` ([!305](https://gitlab.com/open-darts/open-darts/-/merge_requests/305))
