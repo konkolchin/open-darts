@@ -9,7 +9,6 @@ from darts.engines import (
     ms_well_vector,
     sim_params,
     timer_node,
-    value_vector,
 )
 from darts.engines import print_build_info as engines_pbi
 from darts.interpolators import op_vector
@@ -61,6 +60,10 @@ class DartsModel:
     # Verbosity levels accepted by :meth:`run` (and other ``verbose`` switches).
     # ``verbose`` is an integer; legacy ``bool`` values map to 0/1 transparently
     # (Python ``False``/``True`` are ``0``/``1``), so existing callers are unaffected.
+    # This scale gates what reaches the CONSOLE. The end-of-run TS/NI/LI totals
+    # also go to the darts output stream at every level (SolverStats.log()), so
+    # a redirected run keeps them in its log; their own switch is the logging
+    # level (INFO by default).
     VERBOSE_SILENT = 0  # no per-timestep or end-of-run output
     VERBOSE_DEFAULT = 1  # per-timestep lines + end-of-run statistics (legacy True)
     VERBOSE_TIMERS = 2  # additionally print timers at the end of every run() call
@@ -99,9 +102,6 @@ class DartsModel:
         # Create member variables reservoir and physics
         self.reservoir = None
         self.physics = None
-
-        # Create member variable wells (it is needed only for DFM wells)
-        self.wells = None
 
         # Single source of truth for verbosity. Methods with a ``verbose`` parameter
         # default to ``None`` and fall back to this attribute, so the level is set once
@@ -271,12 +271,13 @@ class DartsModel:
             well.ms_type == ms_well.MS_Type.DFM for well in self.reservoir.wells
         )
         if self.has_dfm_well:
-            self.timer.node["simulation"].node["dfm_well_velocity_calculation"] = (
-                timer_node()
-            )
-        else:
-            # If there are no DFM wells, no Python well objects are needed.
-            self.wells = None
+            from darts.models.dfm_model import DFMWellModel
+
+            if not isinstance(self, DFMWellModel):
+                raise TypeError(
+                    "A model with DFM wells must derive from "
+                    "darts.models.dfm_model.DFMWellModel instead of DartsModel."
+                )
 
         # Initialize physics and Engine object
         assert self.physics is not None, "Physics object has not been defined"
@@ -460,17 +461,17 @@ class DartsModel:
                 stationary_point_tolerance=1e-3,  # residual-stagnation detection
                 norm=Norm.L2,  # residual norm
                 coupled_well_res_norm_method=1,  # DFM coupled well-res norm (1 or 2)
-                on_linear_nonconvergence="accept",  # non-converged linear solve with a
-                # usable iterate: 'accept' the inexact-Newton step (historical
-                # FGMRES+CPR behaviour) or 'cut' the timestep (historical MGR)
+                on_linear_nonconvergence="cut",  # non-converged linear solve with a
+                # usable iterate: 'cut' the timestep (historical MGR) or 'accept'
+                # the inexact-Newton step (historical FGMRES+CPR behaviour)
                 chop=ChopSpec(
                     mode="local",  # 'local' | 'global' | None
                     factor=0.1,  # max composition change per iteration
                     log_transform=False,  # solve in log-composition variables
                 ),
                 obl_bounds=OBLBoundsSpec(
-                    mode=None,  # None (off) | 'obl_axes'
-                    axis_min=None,  # per-state-variable lower bounds
+                    mode="obl_axes",  # None (off) | 'obl_axes'
+                    axis_min=[1e-6] + [None] * (self.physics.n_vars - 1),
                     axis_max=None,  # per-state-variable upper bounds
                 ),
             )
@@ -720,7 +721,6 @@ class DartsModel:
             compression=compression,
             compression_level=compression_level,
             verbose=bool(verbose),
-            wells=self.wells,
             has_dfm_well=self.has_dfm_well,
         )
 
@@ -774,7 +774,7 @@ class DartsModel:
         self.op_list = [
             self.physics.acc_flux_itor[region] for region in self.physics.regions
         ] + [self.physics.acc_flux_w_itor]
-        self.op_num = np.array(self.reservoir.mesh.op_num, copy=False)
+        self.op_num = np.asarray(self.reservoir.mesh.op_num)
         self.op_num[self.reservoir.mesh.n_res_blocks :] = len(self.op_list) - 1
 
     def print_config(self):
@@ -838,6 +838,11 @@ class DartsModel:
             ``>=2`` (:attr:`VERBOSE_TIMERS`) additionally print timers at the end of
             every ``run()`` invocation (otherwise timers are only printed when
             :meth:`print_timers` is called manually, usually from ``main.py``).
+
+            This is the console side. The end-of-run TS/NI/LI totals also go to
+            the darts output stream at every level, so a run redirected with
+            ``redirect_darts_output()`` keeps them in its log (see
+            :meth:`~darts.nonlinear_solvers.base.SolverStats.log`).
         :type verbose: int
         :param save_well_data: if True save states of well blocks at every time step to 'well_data.h5', default is True
         :type save_well_data: bool
@@ -874,12 +879,15 @@ class DartsModel:
         stop_time = t + days
 
         # same logic as in engine.run
+        clipped = False  # the attempt's dt was shortened to end exactly at stop_time
         if fabs(t) < 1e-15 or not hasattr(self, "prev_dt"):
             dt = min(ts_control.dt_first, days)
         elif restart_dt > 0.0:
             dt = restart_dt
         else:
-            dt = min(self.prev_dt * ts_control.dt_mult, days, ts_control.dt_max)
+            dt = min(self.prev_dt * ts_control.dt_mult, ts_control.effective_dt_max())
+            clipped = dt > days
+            dt = min(dt, days)
 
         self.prev_dt = dt
 
@@ -905,6 +913,7 @@ class DartsModel:
             xn = np.array(self.physics.engine.Xn, copy=True)[: nb * nc]
             overhead.stop()
             converged = self.run_timestep(dt, t, verbose)
+            ts_control.notify_result(dt, converged, clipped=clipped)
             self.linear_solver._maybe_switch_linear_solver(converged, dt=dt)
 
             overhead.start()
@@ -914,7 +923,7 @@ class DartsModel:
                 ts_counter += 1
                 self.after_converged_timestep()
 
-                x = np.array(self.physics.engine.X, copy=False)[: nb * nc]
+                x = np.asarray(self.physics.engine.X)[: nb * nc]
                 dt_mult_new = ts_control.dt_mult
                 for i in range(nc):
                     max_dx[i] = np.max(abs(xn[i::nc] - x[i::nc]))
@@ -930,12 +939,13 @@ class DartsModel:
                         f"#{ts_counter:d}\tT={t:3g}\tDT={dt:2g}\tNI={self.nonlinear_solver.status.n_newton:d}\tLI={self.nonlinear_solver.status.n_linear:d}\tDT_MULT={dt_mult_new:3.3g}\tdX={max_dx_str}"
                     )
 
-                dt = min(dt * dt_mult_new, ts_control.dt_max)
+                dt = min(dt * dt_mult_new, ts_control.effective_dt_max())
 
                 if np.fabs(t + dt - stop_time) < ts_control.dt_min:
                     dt = stop_time - t
 
-                if t + dt > stop_time:
+                clipped = t + dt > stop_time
+                if clipped:
                     dt = stop_time - t
                 else:
                     self.prev_dt = dt
@@ -951,7 +961,7 @@ class DartsModel:
                 if save_well_data_after_run:
                     # store well data to save later
                     self.output.well_time_labels.append(self.physics.engine.t)
-                    X = np.array(self.physics.engine.X, copy=False)
+                    X = np.asarray(self.physics.engine.X)
 
                     self.output.well_data.append(
                         X.reshape(self.reservoir.mesh.n_blocks, self.physics.n_vars)[
@@ -962,8 +972,14 @@ class DartsModel:
 
             else:
                 dt /= ts_control.dt_mult
+                clipped = False
                 if verbose:
                     print(f"Cut timestep to {dt:2.10f}")
+                    if ts_control.regrowth_hold_steps > 0:
+                        print(
+                            f"dt regrowth limited: <= {ts_control.effective_dt_max():.4g} "
+                            f"for the next {ts_control.regrowth_hold_steps} accepted steps"
+                        )
                 if dt <= ts_control.dt_min:
                     overhead.stop()  # keep the bracket balanced before the assert aborts
                 assert dt > ts_control.dt_min, (
@@ -1006,12 +1022,16 @@ class DartsModel:
             self.physics.write_cache()
             self.timer.node["cache I/O"].stop()
 
+        # The cumulative totals of every run() invocation go to the darts output
+        # stream whatever `verbose` is: a redirected run keeps its log on that
+        # stream, and the log is what a finished (or crashed) run is read back
+        # from, while print() writes to Python's stdout, which no redirect
+        # captures. The console copy stays gated on `verbose` -- in a
+        # redirected run the two land in different places, in an unredirected one
+        # both are the terminal, so the line is then said twice.
+        self.nonlinear_solver.stats.log()
         if verbose:
-            print(
-                f"----- TS = {self.nonlinear_solver.stats.n_timesteps_total:d}({self.nonlinear_solver.stats.n_timesteps_wasted:d}), "
-                f"NI = {self.nonlinear_solver.stats.n_newton_total:d}({self.nonlinear_solver.stats.n_newton_wasted:d}), "
-                f"LI = {self.nonlinear_solver.stats.n_linear_total:d}({self.nonlinear_solver.stats.n_linear_wasted:d}) -----"
-            )
+            self.nonlinear_solver.stats.print()
 
         # At higher verbosity, print the timer breakdown at the end of every run()
         # invocation (the default behaviour only prints timers when print_timers() is
@@ -1039,32 +1059,6 @@ class DartsModel:
         :type verbose: int
         """
         return self.nonlinear_solver.solve_timestep(dt, t, verbose)
-
-    def update_dfm_well_vels_and_ders(self, dt, t, iter_counter):
-        """
-        Update phase velocities and their corresponding derivatives in DFM wells
-
-        :param dt: Time step size [day]
-        :type dt: float
-        :param t: Simulation time [day]
-        :type t: float
-        :param iter_counter: Newton-Raphson iteration counter for the current time step
-        :type iter_counter: int
-        """
-        self.timer.node["simulation"].node["dfm_well_velocity_calculation"].start()
-        for w in self.reservoir.wells:
-            if w.ms_type == ms_well.MS_Type.DFM:
-                start = w.well_head_idx * self.physics.n_vars
-                stop = (w.well_head_idx + w.num_segments) * self.physics.n_vars
-
-                Xn_dfm_well = np.asarray(self.physics.engine.Xn)[start:stop]
-                X_dfm_well = np.asarray(self.physics.engine.X)[start:stop]
-                well_phase_v, well_phase_v_d = self.wells[
-                    w.name
-                ].eval_phase_vels_and_ders(Xn_dfm_well, X_dfm_well, dt, t, iter_counter)
-                w.phases_vels = value_vector(well_phase_v)
-                w.phases_vels_ders = value_vector(well_phase_v_d)
-        self.timer.node["simulation"].node["dfm_well_velocity_calculation"].stop()
 
     def do_after_step(self):
         """
@@ -1118,7 +1112,7 @@ class DartsModel:
         """
         Function to apply modifications to RHS vector.
 
-        If self.set_rhs_flux() is defined in Model, this function will add its values to rhs
+        If self.set_rhs_flux() is defined in Model, this function will add its values to rhs.
 
         :param dt: timestep [days]
         :type dt: float
@@ -1126,9 +1120,8 @@ class DartsModel:
         :type t: float
         """
         if type(self).set_rhs_flux is DartsModel.set_rhs_flux:
-            # If the function has not been overloaded, pass
             return
-        rhs = np.array(self.physics.engine.RHS, copy=False)
+        rhs = np.asarray(self.physics.engine.RHS)
         rhs += self.set_rhs_flux(t) * dt
         return
 

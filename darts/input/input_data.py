@@ -86,6 +86,9 @@ class MeshData:
         self.bnd_tags = None
         self.matrix_tags = None
         self.mesh_filename = None
+        # direction of the mesh z axis: 'downwards' (z is depth, gravity points to +z)
+        # or 'upwards' (z is elevation, gravity points to -z)
+        self.z_axis_direction = 'downwards'
 
 
 class WellControl:
@@ -417,6 +420,7 @@ class WellData:
             bhp_constraint=bhp_constraint,
             temperature=temperature,
             phase_name=phase_name,
+            inj_composition=inj_composition,
         )
         self.wells[name].controls.append((time, wctrl))
 
@@ -426,7 +430,12 @@ class WellData:
         if inj_composition is None:
             inj_composition = []
         wctrl = WellControl()
-        wctrl.inj_bhp_control(bhp=bhp, temperature=temperature, phase_name=phase_name)
+        wctrl.inj_bhp_control(
+            bhp=bhp,
+            temperature=temperature,
+            phase_name=phase_name,
+            inj_composition=inj_composition,
+        )
         self.wells[name].controls.append((time, wctrl))
 
 

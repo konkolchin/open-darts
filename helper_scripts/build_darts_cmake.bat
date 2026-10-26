@@ -248,7 +248,7 @@ REM build and install
 cmake --build . --config %config% --parallel %NT% > ..\make_darts.log 2>&1 || goto :error
 cmake --build . --config %config% --target INSTALL --parallel %NT% >> ..\make_darts.log 2>&1 || goto :error
 
-if %testing%==true ctest -C %config%  || goto :error
+if %testing%==true ctest -C %config% --output-on-failure  || goto :error
 
 cd ..
 echo ========================================================================

@@ -480,6 +480,7 @@ void bind_unified_solver_api(py::module &m)
         .def_readwrite("amg_relax_wt", &cpr_solver_config::amg_relax_wt)
         // CPR formulation knobs (see cpr_solver_config).
         .def_readwrite("weight_scheme", &cpr_solver_config::weight_scheme)
+        .def_readwrite("normalize_pressure_rows", &cpr_solver_config::normalize_pressure_rows)
         .def_readwrite("stage2_type", &cpr_solver_config::stage2_type)
         .def_readwrite("eager_adjoint", &cpr_solver_config::eager_adjoint)
         .def_readwrite("reuse_amg_hierarchy", &cpr_solver_config::reuse_amg_hierarchy)

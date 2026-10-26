@@ -137,7 +137,7 @@ int multilinear_interpolator_base<index_t, value_t, N_DIMS, N_OPS>::interpolate_
                                                                                                  std::vector<double> &values, std::vector<double> &derivatives)
 {
 #ifdef _OPENMP
-#pragma omp parallel for
+#pragma omp parallel for if (points_idxs.size() >= interpolator_omp_min_batch)
 #endif
   for (int64_t i = 0; i < static_cast<int64_t>(points_idxs.size()); ++i)
   {

@@ -135,8 +135,15 @@ def run(physics_type : str, case: str, out_dir: str, export_vtk=True, redirect_l
 
     if not(m.idata.supress_all_output):
         # compute and save well time data
-        td = m.output.store_well_time_data(save_output_files=False)
+        td = m.output.store_well_time_data(save_output_files=True)
         time_data = pd.DataFrame.from_dict(td)
+        # plot volumetric rates (by_sum_perfs and at_wh) and BHP/BHT
+        m.output.plot_well_time_data(phase_molar_rate=False,
+                                     phase_mass_rate=False,
+                                     phase_volumetric_rate=True,
+                                     component_molar_rate=False,
+                                     component_mass_rate=False,
+                                     energy_rate=False)
         # add_columns_time_data(time_data)
 
         # COMPUTE TIME DATA AT FIXED REPORTING STEPS
@@ -256,8 +263,6 @@ def check_performance_local(m, case, physics_type):
         pkl_suffix = '_gpu'
     elif os.getenv('ODLS') != None and os.getenv('ODLS') == '-a':
         pkl_suffix = '_iter'
-    else:
-        pkl_suffix = '_odls'
     print('pkl_suffix=', pkl_suffix)
 
     file_name = os.path.join('ref', 'perf_' + platform.system().lower()[:3] + pkl_suffix +
@@ -305,17 +310,17 @@ if __name__ == '__main__':
 
     cases_list = []
     #cases_list += ['generate_5x3x4']
-    cases_list += ['generate_51x51x1']
+    #cases_list += ['generate_51x51x1']
     #cases_list += ['generate_51x51x1_faultmult']
     #cases_list += ['generate_100x100x100']
-    #cases_list += ['40x40x10']
+    cases_list += ['40x40x10']
     #cases_list += ['40x40x10_hcap']
     #cases_list += ['40x40x10_regions']
 
     well_controls = []
-    #well_controls += ['wrate']
+    well_controls += ['wrate']
     #well_controls += ['wbhp']
-    well_controls += ['wperiodic']
+    #well_controls += ['wperiodic']
 
     for physics_type in physics_list:
         for case_geom in cases_list:

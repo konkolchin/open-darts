@@ -244,6 +244,13 @@ namespace opendarts
       // (Wallis 1983; parity with the proprietary linsolv_bos_cpr), 0 =
       // diagonal-block-only (the previous behaviour).
       int weight_scheme = 1;
+      // Pressure-row scaling handed to BoomerAMG: 0 = sign only (default),
+      // 1 = divide each row by its diagonal. Row scaling breaks the near-
+      // symmetry of a TPFA pressure operator by the neighbour ratio d_j/d_i,
+      // so it is only for chains that already gave the rows an arbitrary
+      // scale to divide back out -- block-Schur condensation of a cell-local
+      // equation. See linsolv_cpr_gpu.hpp for the measurements.
+      int normalize_pressure_rows = 0;
       // Full-system smoothing stage: 1 = in-tree block ILU(0) on the
       // block-CSR system (dense NxN block inverses; parity with the
       // proprietary csr_ilu_prec), 0 = HYPRE scalar ILU(k) on the expanded

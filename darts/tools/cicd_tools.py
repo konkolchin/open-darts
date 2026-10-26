@@ -1,3 +1,10 @@
+"""
+Helpers for the model test suite (models/run_test_suite2.py).
+
+vtk solutions are stored as references and compared with them by `save_vtk_ref()` and
+`compare_vtk_with_ref()` in darts.tools.vtk_io.
+"""
+
 import os
 import pickle
 import platform
@@ -228,17 +235,8 @@ def get_performance_data(m):
     perf_data['wasted newton iterations'] = m.nonlinear_solver.stats.n_newton_wasted
     perf_data['linear iterations'] = m.nonlinear_solver.stats.n_linear_total
     perf_data['wasted linear iterations'] = m.nonlinear_solver.stats.n_linear_wasted
-
-    sim = m.timer.node['simulation']
-    jac = sim.node['jacobian assembly']
-    perf_data['simulation time'] = sim.get_timer()
-    perf_data['linearization time'] = jac.get_timer()
-    perf_data['linear solver time'] = (
-        sim.node['linear solver solve'].get_timer()
-        + sim.node['linear solver setup'].get_timer()
-    )
-    interp = jac.node['interpolation']
-    perf_data['interpolation incl. generation time'] = interp.get_timer()
+    # No wall-clock timings: they vary from run to run and would make reference files
+    # differ between runs with identical results. Read them from m.timer instead.
 
     return perf_data
 

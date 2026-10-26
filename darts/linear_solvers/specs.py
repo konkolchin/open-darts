@@ -475,6 +475,14 @@ class CPRSolverSpec(LinearSolverSpec):
         apply. BoomerAMG is configured with tol=0 (preconditioner stage);
         1 V-cycle matches the proprietary stack.
     :param ilu_fill_level: scalar ILU(k) fill level (``stage2_type == 0``).
+    :param normalize_pressure_rows: pressure-row scaling handed to BoomerAMG --
+        0 = sign only (default), 1 = divide each row by its diagonal. Row
+        scaling breaks the near-symmetry of a TPFA pressure operator by the
+        neighbour ratio ``d_j/d_i`` and costs dearly on rough coefficient
+        fields, so turn it on only when an upstream transform has already
+        given the rows an arbitrary scale to divide back out --
+        :class:`SchurEliminationSpec` sets it on its inner CPR for exactly
+        that reason.
     :param weight_scheme: pressure-decoupling weights -- 1 = column-sum
         True-IMPES (BOS parity, default), 0 = diagonal-block only (previous
         behaviour).
@@ -507,6 +515,7 @@ class CPRSolverSpec(LinearSolverSpec):
     amg_max_iters: int = 1
     ilu_fill_level: int = 0
     weight_scheme: int = 1
+    normalize_pressure_rows: int = 0
     stage2_type: int = 1
     eager_adjoint: bool = False
     amg_coarsen_type: int = 8
@@ -537,6 +546,7 @@ class CPRSolverSpec(LinearSolverSpec):
         config.amg_max_iters = self.amg_max_iters
         config.ilu_fill_level = self.ilu_fill_level
         config.weight_scheme = self.weight_scheme
+        config.normalize_pressure_rows = self.normalize_pressure_rows
         config.stage2_type = self.stage2_type
         config.eager_adjoint = self.eager_adjoint
         config.amg_coarsen_type = self.amg_coarsen_type
@@ -831,9 +841,33 @@ class SchurEliminationSpec(LinearSolverSpec):
         wrapper = linear_solvers.create_linear_solver(
             self.registry_name, self._make_config(), block_size
         )
+        # Condensing a cell-local equation changes the True-IMPES reference
+        # equation, so every pressure row of the reduced system carries an
+        # arbitrary per-cell factor (the reduced and full pressure operators
+        # are the same operator up to that factor). Dividing each row by its
+        # diagonal takes it back out. Mirrors what make_gpu_schur_elim_chain
+        # does for the GPU chain; harmful anywhere else, hence not a default.
+        for spec in self._inner_cpr_specs():
+            if spec.normalize_pressure_rows == 0:
+                spec.normalize_pressure_rows = 1
         self._built_inner = self.inner.build(block_size - k)
         wrapper.set_prec(self._built_inner)
         return wrapper
+
+    def _inner_cpr_specs(self):
+        """Every CPRSolverSpec reachable from :attr:`inner` (it may sit behind a
+        Krylov spec's ``prec``, and that nesting is unbounded)."""
+        found, seen, stack = [], set(), [self.inner]
+        while stack:
+            spec = stack.pop()
+            if spec is None or id(spec) in seen:
+                continue
+            seen.add(id(spec))
+            if isinstance(spec, CPRSolverSpec):
+                found.append(spec)
+            for attr in ("prec", "inner"):
+                stack.append(getattr(spec, attr, None))
+        return found
 
 
 @dataclass
@@ -866,6 +900,28 @@ class GPUSolverSpec(LinearSolverSpec):
     schur_elim_count: int = 0
     schur_elim_rows: list[int] | None = None
     schur_elim_cols: list[int] | None = None
+
+    #: Krylov subspace dimension of the outer restarted GMRES (the CPU-side
+    #: equivalent is :attr:`GMRESSolverSpec.restart`). ``0`` keeps the engine
+    #: default of 50. Only the open-source GMRES + AMGX-CPR chain reads it
+    #: (:class:`AMGXCPRSolverSpec`, with or without ``schur_elim_count``); the
+    #: other GPU chains ignore it.
+    gmres_restart: int = 0
+
+    #: Block-local EQUATION order handed to the GPU chain (``None`` = off): entry r
+    #: is the original local equation placed in local row r; the chain then solves
+    #: P A x = P b, whose solution is the same x. DARTS puts local equation k on the
+    #: diagonal of unknown k-1 (equation 0 on pressure), which is harmless for
+    #: flowing components but not when equation 0 is a NON-FLOWING mineral balance:
+    #: unpivoted block ILU(0) then divides by d(mineral)/dp -> 0 and the chain
+    #: returns updates whose TRUE residual is far from zero while GMRES reports
+    #: convergence (see ``linear_solvers/include/linsolv_block_row_perm.hpp``). The
+    #: natural order is the cyclic shift ``[n_vars-1, 0, .., n_vars-2]``. Combines
+    #: with :attr:`schur_elim_count` (pairs in the original numbering): the
+    #: reduced system keeps the permuted order, its pressure reference equation
+    #: is the retained flowing balance, and the Schur chain then converges like
+    #: the full chain at less cost per solve.
+    block_row_perm: list[int] | None = None
 
     def build(self, block_size: int):
         raise NotImplementedError(

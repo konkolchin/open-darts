@@ -45,6 +45,31 @@ namespace opendarts
       */
       bool compare_files(std::string filename_1, std::string filename_2);
 
+      /** Compares two matrix dump files \p filename_1 and \p filename_2 field by field,
+          comparing numeric fields by VALUE rather than by their text.
+
+          compare_files is a byte comparison, so for these reference files it also pins
+          things that carry no information: whether the file ends in a newline, whether it
+          was checked out CRLF or LF, and the exact spelling a number was printed with.
+          Those are exactly the things that change when a reference file is regenerated and
+          passes through an editor -- an editor that adds a final newline silently turns
+          the dump into "Different number of lines in files!", which says nothing about
+          what actually differs and costs a full CI round trip to chase down. (That is not
+          hypothetical: it is how this comparison came to exist.)
+
+          This keeps everything that matters strict -- the layout, the comments, the
+          indices, the field count of every line, and the values themselves, which must
+          match EXACTLY, bit for bit. It tolerates a difference in notation or in trailing
+          whitespace, never a difference in value or a loss of precision. Precision of the
+          dump itself is covered separately, and portably, by the export_precision test.
+
+          @param filename_1 - The filename of the first file.
+          @param filename_2 - The filename of the second file.
+
+          @return The comparison result of the two files: (true) equal, (false) different.
+      */
+      bool compare_matrix_files(std::string filename_1, std::string filename_2);
+
       /** Generates a tridiagonal matrix with values -2, 1, 2 in the diagonals -2, 0, 2.
 
           @param A - The opendarts::linear_solvers::csr_matrix to populate.

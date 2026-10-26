@@ -177,7 +177,7 @@ class Model(DartsModel):
         }
         pc.conductivity_ev = {
             'V': ConstFunc(0.0),
-            'L': ConstFunc(172.8),                 # kJ/m/day/K, matches geothermal default
+            'L': ConstFunc(52.0),                 # kJ/m/day/K
         }
         # output_props exposes derived T (K) via the property interpolator
         pc.output_props = {'temperature': lambda: pc.temperature}
@@ -255,6 +255,14 @@ class Model(DartsModel):
             return self.physics.set_initial_conditions_from_array(self.reservoir.mesh,
                                                                   input_distribution=input_distribution)
 
+    def reset(self):
+        # Well controls are derived from the reservoir state (BHP targets, injection temperature). init() calls
+        # set_well_controls() before the initial conditions are set, so the controls are applied here, right before
+        # the engine is initialized (also on the restart path).
+        self.set_well_controls()
+        self.set_well_constraints()
+        super().reset()
+
     def well_is_inj(self, wname : str):  # determine well control by its name
         return "I" in wname
 
@@ -263,30 +271,32 @@ class Model(DartsModel):
         inj_rate = wctrl.inj_rate
         prod_rate = wctrl.prod_rate
 
-        P = self.get_pressure('full')
-        T = self.get_temperature('full')
+        # Until the engine is initialized the reservoir state is in mesh.initial_state, laid out as [P, T, P, T, ...]
+        nvars = 2
+        X = np.array(self.physics.engine.X, copy=True)
+        if X.size == 0:
+            X = np.array(self.reservoir.mesh.initial_state, copy=True)
+        start, end = self.get_mat_frac_range('full')
+        P = X[nvars*start:nvars*end:nvars]
+        T = X[nvars*start + 1:nvars*end:nvars]
 
         if P.size == 0:
-            inj_temp = 300.
-            inj_rate = 0.
-            prod_rate = 0.
+            return 0  # no reservoir state yet, the controls are set from reset()
 
+        self.well_inj_temp = {}
         for i, w in enumerate(self.reservoir.wells):
             well_top_perf_idx = self.well_perf_loc[w.name][0]
             if self.well_is_inj(w.name):
+                inj_temp = T[well_top_perf_idx] - wctrl.delta_temp
+                self.well_inj_temp[w.name] = inj_temp
                 if inj_rate is None:  # BHP control
                     inj_bhp = P[well_top_perf_idx] + wctrl.delta_p_prod  # rsv block pressure at the top perforation + delta_p
-                    inj_temp = T[well_top_perf_idx] - wctrl.delta_temp
                     self.physics.set_well_controls(wctrl=w.control, control_type=well_control_iface.BHP,
                                                    is_inj=True, target=inj_bhp, inj_composition=[], inj_temp=inj_temp)
                 else:
                     # Rate Control
-                    self.physics.set_well_controls(wctrl=w.control, control_type=well_control_iface.VOLUMETRIC_RATE,
+                    self.physics.set_well_controls(wctrl=w.control, control_type=well_control_iface.MASS_RATE,
                                                    is_inj=True, target=inj_rate, phase_name='L', inj_composition=[], inj_temp=inj_temp)
-                    # BHP Constraint
-                    self.physics.set_well_controls(wctrl=w.control, control_type=well_control_iface.BHP,
-                                                   is_inj=True, target=wctrl.inj_bhp_constraint, inj_composition=[],
-                                                   inj_temp=inj_temp)
             else:
                 if prod_rate is None:  # BHP control
                     prod_bhp = P[well_top_perf_idx] - wctrl.delta_p_prod  # rsv block pressure at the top perforation - delta_p
@@ -294,11 +304,8 @@ class Model(DartsModel):
                                                    is_inj=False, target=prod_bhp)
                 else:
                     # Rate Control
-                    self.physics.set_well_controls(wctrl=w.control, control_type=well_control_iface.VOLUMETRIC_RATE,
+                    self.physics.set_well_controls(wctrl=w.control, control_type=well_control_iface.MASS_RATE,
                                                    is_inj=False, target=-np.abs(prod_rate), phase_name='L')
-                    # BHP Constraint
-                    self.physics.set_well_controls(wctrl=w.control, control_type=well_control_iface.BHP,
-                                                   is_inj=False, target=wctrl.prod_bhp_constraint)
 
             # print(w.name,
             #       w.well_head_depth,
@@ -306,6 +313,18 @@ class Model(DartsModel):
             #       w.control.target_temperature if hasattr(w.control, 'target_temperature') else '',
             #       w.control.target_rate if hasattr(w.control, 'target_rate') else '')
         return 0
+
+    def set_well_constraints(self):
+        wctrl = self.idata.well_data.controls
+        for w in self.reservoir.wells:
+            if self.well_is_inj(w.name):
+                if wctrl.inj_rate is not None:
+                    self.physics.set_well_controls(wctrl=w.constraint, control_type=well_control_iface.BHP,
+                                                   is_inj=True, target=wctrl.inj_bhp_constraint, inj_composition=[],
+                                                   inj_temp=self.well_inj_temp[w.name])
+            elif wctrl.prod_rate is not None:
+                self.physics.set_well_controls(wctrl=w.constraint, control_type=well_control_iface.BHP,
+                                               is_inj=False, target=wctrl.prod_bhp_constraint)
 
     def get_mat_frac_range(self, part):
         # order: fracture, matrix

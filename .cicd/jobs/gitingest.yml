@@ -160,6 +160,12 @@ gitingest-digest:
 trigger-mcp-ingest:
   stage: ingest
   needs: ["gitingest-digest"]
+  # no global defaults: they configure this project's jobs, and job-only
+  # variables are empty in a trigger job, so PIP_CONSTRAINT would reach
+  # mcp-server as /.cicd/constraints.txt and fail its pip installs. The
+  # variables below and the pipeline variables are still forwarded.
+  inherit:
+    variables: false
   trigger:
     project: open-darts/mcp-server
     branch: main

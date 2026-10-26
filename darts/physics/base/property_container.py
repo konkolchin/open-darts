@@ -11,7 +11,58 @@ from darts.physics.properties.hysteresis import (
 )
 
 
+class PropertyBatch:
+    """
+    Phase properties of a batch of states, the array form of what :meth:`PropertyContainer.evaluate` leaves in the
+    container for one state. :meth:`PropertyContainer.evaluate_batch` returns it.
+
+    Every array has the point index as its first axis. Along the other axes it holds, for each point, the value the
+    container attribute of the same name has after ``evaluate()`` of that point, including the zeros that
+    :meth:`PropertyContainer.clean_arrays` leaves for absent phases.
+
+    - ``evaluated`` (n,) bool: points the container evaluated; the operator sets evaluate the other points one by one
+      with ``evaluate()``, so a container can leave out states it handles only in its scalar code
+    - ``present`` (n, nph) bool: phase j is present (``j in ph``)
+    - ``x`` (n, np_fl, nc_fl); ``dens``, ``dens_m``, ``sat`` (n, nph); ``mu``, ``kr``, ``pc`` (n, np_fl);
+      ``mass_source`` (n, nc); ``temperature`` (n,)
+    - ``rock_compr`` (n,): ``rock_compr_ev.evaluate(p)``, the rock compaction factor the reservoir operators apply
+    """
+
+    def __init__(self, n_points: int, container: "PropertyContainer"):
+        """
+        Zero arrays (``evaluated`` True, ``rock_compr`` 1, ``temperature`` the container's constant temperature).
+
+        :param n_points: number of states in the batch
+        :type n_points: int
+        :param container: property container that sets the array dimensions and the constant temperature
+        :type container: PropertyContainer
+        """
+        nph, np_fl = container.nph, container.np_fl
+        nc, nc_fl = container.nc, container.nc_fl
+        temperature = container.temperature
+        self.evaluated = np.ones(n_points, dtype=bool)
+        self.present = np.zeros((n_points, nph), dtype=bool)
+        self.x = np.zeros((n_points, np_fl, nc_fl))
+        self.dens = np.zeros((n_points, nph))
+        self.dens_m = np.zeros((n_points, nph))
+        self.sat = np.zeros((n_points, nph))
+        self.mu = np.zeros((n_points, np_fl))
+        self.kr = np.zeros((n_points, np_fl))
+        self.pc = np.zeros((n_points, np_fl))
+        self.mass_source = np.zeros((n_points, nc))
+        self.temperature = np.full(
+            n_points, np.nan if temperature is None else float(temperature)
+        )
+        self.rock_compr = np.ones(n_points)
+
+
 class PropertyContainer:
+    """
+    Phase properties for the operator sets: the property evaluators (flash, densities, viscosities, relative
+    permeabilities, capillary pressures, ...) and the arrays that :meth:`evaluate` fills for one state.
+    :meth:`evaluate_batch` is the optional array form for many states.
+    """
+
     # Interface attributes (folded in from the former PropertyBase):
     nc: int
     nph: int
@@ -83,8 +134,8 @@ class PropertyContainer:
             self.thermal = True
             self.temperature = None
 
-        # In case of PH-formulation, PT flashes are required for calculating initial distribution (Initialize class)
-        self.evaluate_PT_bool = False  # set to True when PH-formulation but PT-flash needs to be calculated (Initialize)
+        # Set to True during PT-parametrized initialization of PH/PS formulations.
+        self.evaluate_PT_bool = False
 
         # Allocate (empty) evaluators for functions
         self.density_ev = {}
@@ -273,8 +324,9 @@ class PropertyContainer:
             a[:] = 0
         for j in range(self.np_fl):
             self.x[j][:] = 0
+            self.x_mass[j][:] = 0
 
-    def compute_saturation(self, state_pt=None, evaluate_PT_from_PHflash: bool = False):
+    def compute_saturation(self, state_pt=None):
         """
         Compute phase saturations from molar phase fractions and phase densities.
 
@@ -286,18 +338,16 @@ class PropertyContainer:
           separate ``compute_saturation_full()`` method). Runs the flash for the given
           PT-state and computes phase densities before computing saturations.
 
-        :param state_pt: State (pressure, [temperature], compositions) to flash; if
-                          ``None``, uses the already-computed ``self.ph``/``self.dens_m``
-        :param evaluate_PT_from_PHflash: Passed to :meth:`run_flash` when ``state_pt`` is
-                                          given, to evaluate PT-state from a PH-flash object
+        :param state_pt: PT state ``[pressure, compositions..., temperature]`` to flash;
+                         if ``None``, uses the already-computed ``self.ph``/``self.dens_m``
         :returns: Saturation of the first phase, ``self.sat[0]``
         """
         if state_pt is not None:
             pressure, temperature, zc = self.get_state(state_pt)
             self.clean_arrays()
-            self.ph = self.run_flash(
-                pressure, temperature, zc, evaluate_PT=evaluate_PT_from_PHflash
-            )
+            flash_type = getattr(self.flash_ev, "flash_type", 0)
+            evaluate_PT = getattr(flash_type, "value", flash_type) > 0
+            self.ph = self.run_flash(pressure, temperature, zc, evaluate_PT=evaluate_PT)
 
             for j in self.ph:
                 M = np.sum(self.Mw * self.x[j][:])
@@ -345,7 +395,7 @@ class PropertyContainer:
 
         # Evaluates flash, then uses getter for nu and x - for compatibility with DARTS-flash
         if evaluate_PT:
-            # In case of PH-formulation, PT flashes are required for calculating initial distribution
+            # PH/PS initialization supplies temperature, so use the PX object's PT path.
             error_output = self.flash_ev.evaluate(
                 pressure, state_spec_2, zc_norm, evaluate_PT=True
             )
@@ -451,7 +501,7 @@ class PropertyContainer:
         # evaluators can accept any subset of history variables by name (e.g. sg_max=...).
         # Plain evaluators without the mixin are called with sat only, unchanged.
         if isinstance(self.capillary_pressure_ev, dict):
-            for j in self.ph:
+            for j in range(self.np_fl):
                 pc_ev = self.capillary_pressure_ev[self.phases_name[j]]
                 if self.history_values and isinstance(pc_ev, HistoryAwareCapPressure):
                     self.pc[j] = pc_ev.evaluate(self.sat[j], **self.history_values)
@@ -481,6 +531,30 @@ class PropertyContainer:
 
         return
 
+    def evaluate_batch(self, states: np.ndarray):
+        """
+        Evaluate the phase properties of many states at once (optional batch protocol).
+
+        The operator sets with a vectorised assembly (:class:`ReservoirOperators`, :class:`WellOperators`,
+        :class:`WellCtrlOperators`) call it when an OBL interpolator asks for many new supporting points, and evaluate
+        with :meth:`evaluate`, one point at a time, the points it leaves out (``PropertyBatch.evaluated`` False) or
+        all points when it returns ``None``. An implementation must give for every evaluated point the values
+        :meth:`evaluate` gives for that state; when it repeats the arithmetic of :meth:`evaluate` operation by
+        operation the operator values are bitwise identical to the scalar ones. The operator sets themselves call
+        ``diffusion_ev[phase].evaluate()`` once per batch and ``permporo_mult_ev.evaluate(phi_f)`` once per distinct
+        ``phi_f``, and use the scalar path for thermal physics and for states that need composition extrapolation.
+        A subclass that overrides :meth:`evaluate` must override this method too: the operator sets do not use a
+        batch form defined above the class that last overrides :meth:`evaluate`.
+
+        The default returns ``None``: the container has no batch support.
+
+        :param states: states, one per row, laid out as for :meth:`evaluate`
+        :type states: np.ndarray
+        :returns: properties of the states, or ``None`` if the container cannot evaluate them as a batch
+        :rtype: PropertyBatch | None
+        """
+        return None
+
     def evaluate_thermal(self, state):
         """
         Evaluate the phase properties used only in the energy conservation equation
@@ -498,6 +572,9 @@ class PropertyContainer:
 
         for j in range(self.ns):
             idx = self.np_fl + j
+            # Explicit solids have no row in self.x, so self.x[0, :] is passed only as a
+            # required placeholder; the evaluator ignores it and uses its internally
+            # stored solid-phase composition.
             self.enthalpy[idx] = self.enthalpy_ev[self.phases_name[idx]].evaluate(
                 self.pressure, self.temperature, self.x[0, :]
             )

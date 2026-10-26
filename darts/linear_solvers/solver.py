@@ -267,12 +267,12 @@ class LinearSolver:
             )
 
     def _block_size(self) -> int:
-        """Matrix block size for building a solver: ``engine.N_VARS`` for mechanics
+        """Matrix block size for building a solver: ``engine.get_n_vars()`` for mechanics
         engines (it includes the displacement DOFs that ``physics.n_vars`` does not
         count), else ``physics.n_vars`` (pressure + n_components - 1 for flow)."""
         engine = getattr(self.model.physics, "engine", None)
-        if engine is not None and hasattr(engine, "N_VARS"):
-            return engine.N_VARS
+        if engine is not None:
+            return engine.get_n_vars()
         return self.model.physics.n_vars
 
     def _apply_solver(self):
@@ -414,6 +414,9 @@ class LinearSolver:
                     "or run on platform='cpu'.",
                     stacklevel=2,
                 )
+            # the engine falls back to its default GPU chain: it must not inherit
+            # factory inputs a previously applied GPUSolverSpec left in params
+            self._clear_gpu_factory_params()
             return
         enum_value = getattr(sim_params, linear_type_name, None)
         if enum_value is None:
@@ -424,6 +427,45 @@ class LinearSolver:
                 "available."
             )
         model.params.linear_type = enum_value
+        # Outer restarted-GMRES Krylov dimension. ALWAYS written (0 -> the engine
+        # default) so that re-selecting a solver cannot inherit the previous
+        # spec's restart length. See GPUSolverSpec.gmres_restart.
+        if hasattr(model.params, "gmres_restart"):
+            restart = int(getattr(spec, "gmres_restart", 0) or 0)
+            if restart < 0:
+                raise ValueError(
+                    f"{type(spec).__name__}: gmres_restart must be >= 0 "
+                    f"(0 = engine default), got {restart}."
+                )
+            # `or <default>` rather than a literal: the engine owns the default
+            # (sim_params' constructor) and this must not drift from it.
+            model.params.gmres_restart = restart or type(model.params)().gmres_restart
+        # Block-local equation order. ALWAYS written (empty = off) so a solver
+        # re-selection cannot inherit it. See GPUSolverSpec.block_row_perm.
+        if getattr(spec, "block_row_perm", None) and not hasattr(
+            model.params, "block_row_perm"
+        ):
+            # an explicit request must not be dropped silently
+            raise ValueError(
+                f"{type(spec).__name__}: block_row_perm was requested but this "
+                "darts.engines build has no sim_params.block_row_perm -- rebuild "
+                "open-darts."
+            )
+        if hasattr(model.params, "block_row_perm"):
+            from darts.engines import index_vector
+
+            row_perm = getattr(spec, "block_row_perm", None)
+            if row_perm:
+                row_perm = [int(r) for r in row_perm]
+                n_vars = self._block_size()
+                # length too: the C++ wrapper would only reject it after the whole
+                # chain has been built
+                if sorted(row_perm) != list(range(n_vars)):
+                    raise ValueError(
+                        f"{type(spec).__name__}: block_row_perm must be a permutation "
+                        f"of 0..{n_vars - 1} (block size {n_vars}), got {row_perm}."
+                    )
+            model.params.block_row_perm = index_vector(row_perm or [])
         # Local (block-Schur) elimination: the GPU engine factory wraps the
         # selected chain in linsolv_schur_elim<N,K> when this counter is set. The
         # explicit eliminated (row, column) pairs are passed through params.
@@ -455,6 +497,21 @@ class LinearSolver:
                 model.params.schur_elim_count = 0
                 model.params.schur_elim_rows = index_vector([])
                 model.params.schur_elim_cols = index_vector([])
+
+    def _clear_gpu_factory_params(self):
+        """Reset the GPU engine-factory inputs to their defaults (restart length,
+        block-local equation order, local Schur elimination)."""
+        params = self.model.params
+        from darts.engines import index_vector
+
+        if hasattr(params, "gmres_restart"):
+            params.gmres_restart = type(params)().gmres_restart
+        if hasattr(params, "block_row_perm"):
+            params.block_row_perm = index_vector([])
+        if hasattr(params, "schur_elim_count"):
+            params.schur_elim_count = 0
+            params.schur_elim_rows = index_vector([])
+            params.schur_elim_cols = index_vector([])
 
     @staticmethod
     def open_source_solvers_available() -> bool:
@@ -751,8 +808,8 @@ class LinearSolver:
         indices = np.asarray(model.physics.engine.jac_cols)
         data = np.asarray(model.physics.engine.jac_vals)
 
-        rhs = np.array(model.physics.engine.RHS, copy=False)
-        sol = np.array(model.physics.engine.dX, copy=False)
+        rhs = np.asarray(model.physics.engine.RHS)
+        sol = np.asarray(model.physics.engine.dX)
 
         nonzeros = indices.size
 

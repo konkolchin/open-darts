@@ -6,13 +6,11 @@ from darts.engines import redirect_darts_output, timer_node
 
 
 def _pkl_suffix():
-    """Solver/platform suffix of the reference file: ``_odls`` / ``_iter`` / ``_gpu``.
+    """Solver/platform suffix of the reference file: empty (open-source CPU) / ``_iter`` / ``_gpu``.
 
     Shares the suite-wide helper so the name matches what ``models/archive_pkl.sh``
-    collects into the CI artifact. This model used to compute the suffix itself and
-    returned an empty string on the open-source lane, where the rest of the suite
-    uses ``_odls`` -- those references fell outside the ``perf_lin_odls*.pkl`` glob
-    and never reached the artifact. Falls back to the same rule when ``main.py`` is
+    collects into the CI artifact; a suffix of its own would leave the references
+    outside the archive globs. Falls back to the same rule when ``main.py`` is
     run standalone from this directory, where ``models/`` is not on ``sys.path``.
 
     :returns: the suffix string
@@ -27,7 +25,7 @@ def _pkl_suffix():
     except ImportError:
         if os.getenv('TEST_GPU') == '1':
             return '_gpu'
-        return '_iter' if os.getenv('ODLS') == '-a' else '_odls'
+        return '_iter' if os.getenv('ODLS') == '-a' else ''
 
 try:
     # if compiled with OpenMP, set to run with 1 thread, as mech tests are not working in the multithread version yet
@@ -181,7 +179,7 @@ def test(mesh_type, physics_type, overwrite='0'):
         return False, 0.0
 
     if is_plk_exist:
-        return (failed > 0), data[-1]['simulation time']
+        return (failed > 0), m.timer.node['simulation'].get_timer()
     else:
         return False, -1.0
 

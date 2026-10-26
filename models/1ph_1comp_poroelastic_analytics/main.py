@@ -4,6 +4,7 @@ import numpy as np
 import meshio
 from math import fabs
 import os
+import sys
 from scipy.interpolate import interp1d
 import subprocess
 from darts.tools.gen_msh import generate_box_3d
@@ -26,6 +27,25 @@ try:
     set_num_threads(1)
 except:
     pass
+
+def _pkl_suffix():
+    '''
+    Solver/platform suffix of the reference files: '' (open-source CPU) / '_iter' / '_gpu'.
+    Shares the suite-wide helper, as SPE10_mech does, so the name matches the tracked references;
+    with another suffix the test finds no reference and compares nothing.
+    Falls back to the same rule when main.py
+    is run standalone from this directory, where models/ is not on sys.path.
+    '''
+    models_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if models_dir not in sys.path:
+        sys.path.append(models_dir)
+    try:
+        from compare_well_time_series import get_pkl_suffix
+        return get_pkl_suffix()
+    except ImportError:
+        if os.getenv('TEST_GPU') == '1':
+            return '_gpu'
+        return '_iter' if os.getenv('ODLS') == '-a' else ''
 
 def generate_mesh(mesh='rect'):
     '''
@@ -129,16 +149,13 @@ def test(case='mandel', discr_name='mech_discretizer', mesh='rect', overwrite='0
     print('case:' + case, 'discr_name:' + discr_name, 'mesh: ' + mesh, 'overwrite: ' + overwrite, sep=', ')
     import platform
 
-    nt = 20
-    max_dt = 200
-    t = np.logspace(-3, np.log10(max_dt), nt)
-    # nt = 200
-    # max_t = 200
-    # t = max_t / nt * np.ones(nt)
     if 'rect' in mesh:
         generate_mesh(mesh=mesh)
     m = Model(case=case, discretizer=discr_name, mesh=mesh)
     m.init()
+    # the model's own schedule, as in run_and_plot: 60 log-spaced steps (bai 1e-7..0.1 days, others 1e-3..30 days).
+    # the steps are short relative to the elapsed time, so backward Euler stays close to the analytical solution
+    t = m.idata.sim.time_steps
     redirect_darts_output('log.txt')
     # output_directory = 'sol_{:s}'.format(m.physics_type)
     m.timer.node["update"] = timer_node()
@@ -147,18 +164,20 @@ def test(case='mandel', discr_name='mech_discretizer', mesh='rect', overwrite='0
     time = 0.0
     data = []
 
-    # poromech tests run with direct linear solvers (superlu), but somehow there is a difference
-    # while using old and new lib. To handle this, use '_iter' pkls for old lib
-    pkl_suffix = ''
-    if os.getenv('ODLS') != None and os.getenv('ODLS') == '-a':
-        pkl_suffix = '_iter'
+    pkl_suffix = _pkl_suffix()
     file_name = os.path.join('ref', 'perf_' + platform.system().lower()[:3] + pkl_suffix +
                              '_' + case + '_' + discr_name + '_' + mesh + '.pkl')
     failed = 0
 
     is_plk_exist = os.path.isfile(file_name)
+    compare = is_plk_exist
     if is_plk_exist:
         ref_data = m.load_performance_data(file_name=file_name)
+        if len(ref_data) != t.size:
+            # e.g. after a schedule change: fail instead of an IndexError, and still save with overwrite
+            print('Reference', file_name, 'has', len(ref_data), 'time steps, the run has', t.size, '- not compared')
+            compare = False
+            failed += 1
 
     for ith_step, dt in enumerate(t):
         time += dt
@@ -169,7 +188,7 @@ def test(case='mandel', discr_name='mech_discretizer', mesh='rect', overwrite='0
         # write a vtk snapshot
         # m.reservoir.write_to_vtk(output_directory, ith_step + 1, m.physics)
         data.append(m.get_performance_data(is_last_ts=(ith_step == t.size - 1)))
-        if is_plk_exist:
+        if compare:
             # to compare with analytic need only solution vector
             if False:
                 an_data_step = {'solution' : get_analytic_solution(m, discr_name, t=time)['solution']}
@@ -188,7 +207,7 @@ def test(case='mandel', discr_name='mech_discretizer', mesh='rect', overwrite='0
     # m.print_timers()
 
     if is_plk_exist:
-        return (failed > 0), data[-1]['simulation time']
+        return (failed > 0), m.timer.node['simulation'].get_timer()
     else:
         return False, -1.0
 def run_and_plot(case='mandel', discretizer='mech_discretizer', mesh='rect', convergence_analysis=False):
@@ -300,26 +319,27 @@ def run_and_plot(case='mandel', discretizer='mech_discretizer', mesh='rect', con
         run_python(m, dt)
 
         X = np.array(m.physics.engine.X, copy=False)
+        engine_n_vars = m.physics.engine.get_n_vars()
         if case == 'mandel':
-            pres['darts'][ith_step + 1] = X[m.physics.engine.P_VAR::m.physics.engine.N_VARS][::ny]  # for rectangular grid
-            disp['darts'][ith_step + 1] = X[m.physics.engine.U_VAR::m.physics.engine.N_VARS][::ny]  # for rectangular grid
+            pres['darts'][ith_step + 1] = X[m.physics.engine.P_VAR::engine_n_vars][::ny]  # for rectangular grid
+            disp['darts'][ith_step + 1] = X[m.physics.engine.U_VAR::engine_n_vars][::ny]  # for rectangular grid
             pres['analytics'][ith_step + 1] = m.reservoir.mandel_exact_pressure(idata=m.idata, t=time, xc=x)
             p,ux,uy = m.reservoir.mandel_exact_displacements(idata=m.idata, t=time, xc=xc)
             disp['analytics'][ith_step + 1] = ux
         elif case == 'terzaghi':
-            pres['darts'][ith_step + 1] = X[m.physics.engine.P_VAR::m.physics.engine.N_VARS][::ny]  # for rectangular grid
-            disp['darts'][ith_step + 1] = X[m.physics.engine.U_VAR::m.physics.engine.N_VARS][::ny]  # for rectangular grid
+            pres['darts'][ith_step + 1] = X[m.physics.engine.P_VAR::engine_n_vars][::ny]  # for rectangular grid
+            disp['darts'][ith_step + 1] = X[m.physics.engine.U_VAR::engine_n_vars][::ny]  # for rectangular grid
             pres['analytics'][ith_step + 1] = m.reservoir.terzaghi_exact_pressure(idata=m.idata, t=time, xc=x)
             disp['analytics'][ith_step + 1] = m.reservoir.terzaghi_exact_displacements(idata=m.idata,t=time, xc=x)
         elif case == 'terzaghi_two_layers':
-            pres['darts'][ith_step + 1] = X[m.physics.engine.P_VAR::m.physics.engine.N_VARS][::ny]  # for rectangular grid
-            disp['darts'][ith_step + 1] = X[m.physics.engine.U_VAR::m.physics.engine.N_VARS][::ny]  # for rectangular grid
+            pres['darts'][ith_step + 1] = X[m.physics.engine.P_VAR::engine_n_vars][::ny]  # for rectangular grid
+            disp['darts'][ith_step + 1] = X[m.physics.engine.U_VAR::engine_n_vars][::ny]  # for rectangular grid
             pres['analytics'][ith_step + 1] = m.reservoir.terzaghi_two_layers_exact_pressure(t=time, xc=x)
             disp['analytics'][ith_step + 1] = m.reservoir.terzaghi_two_layers_exact_displacement(t=time, xc=x)
         elif case == 'bai':
-            p_num = X[m.physics.engine.P_VAR::m.physics.engine.N_VARS][id_num]
-            t_num = X[m.physics.engine.T_VAR::m.physics.engine.N_VARS][id_num]
-            u_num = X[m.physics.engine.U_VAR + 1::m.physics.engine.N_VARS][id_num]
+            p_num = X[m.physics.engine.P_VAR::engine_n_vars][id_num]
+            t_num = X[m.physics.engine.T_VAR::engine_n_vars][id_num]
+            u_num = X[m.physics.engine.U_VAR + 1::engine_n_vars][id_num]
             fp = interp1d(y_num, p_num, kind='linear', fill_value='extrapolate')
             ft = interp1d(y_num, t_num, kind='linear', fill_value='extrapolate')
             fu = interp1d(y_num, u_num, kind='linear', fill_value='extrapolate')
@@ -550,7 +570,7 @@ def get_analytic_solution(m, discr_name, t):
         pressure = m.reservoir.terzaghi_two_layers_exact_pressure(t=t, xc=x)
         ux = m.reservoir.terzaghi_two_layers_exact_displacement(t=t, xc=x)
 
-    nvars = 4 # m.physics.n_vars #TODO why m.physics.n_vars == 1 ?
+    nvars = m.physics.engine.get_n_vars()
     ref_data['solution'] = np.zeros(nvars * nx)
     ref_data['solution'][m.reservoir.p_var::nvars] = pressure
     ref_data['solution'][m.reservoir.u_var::nvars] = ux
@@ -560,7 +580,7 @@ def get_analytic_solution(m, discr_name, t):
 
 def get_solution_slice(m, discr_name, mesh, sol_data):
     nx, ny, x, xc = get_x(m, discr_name)
-    nvars = m.physics.engine.N_VARS
+    nvars = m.physics.engine.get_n_vars()
     sol_data_slice = sol_data.copy()  # copy keys of the dictionary
     sol_data_slice['solution'] = np.zeros(nx * nvars)
     for v in range(nvars):
@@ -573,13 +593,13 @@ def get_solution_slice(m, discr_name, mesh, sol_data):
 
 if __name__ == '__main__':
     # Rectangular grid, comparison to analytics
-    #run_and_plot(case='terzaghi', discretizer='mech_discretizer', mesh='rect')
+    run_and_plot(case='terzaghi', discretizer='mech_discretizer', mesh='rect')
     #run_and_plot(case='terzaghi', discretizer='pm_discretizer', mesh='rect')
-    #run_and_plot(case='mandel', discretizer='mech_discretizer', mesh='rect')
+    run_and_plot(case='mandel', discretizer='mech_discretizer', mesh='rect')
     #run_and_plot(case='mandel', discretizer='pm_discretizer', mesh='rect')
     #run_and_plot(case='terzaghi_two_layers', discretizer='pm_discretizer', mesh='rect')
-    #run_and_plot(case='terzaghi_two_layers', discretizer='mech_discretizer', mesh='rect')
-    #run_and_plot(case='bai', discretizer='mech_discretizer', mesh='rect')
+    run_and_plot(case='terzaghi_two_layers', discretizer='mech_discretizer', mesh='rect')
+    run_and_plot(case='bai', discretizer='mech_discretizer', mesh='rect')
 
     # Wedge (triangular) grid
     #run(case='terzaghi', discretizer='mech_discretizer', mesh='wedge')
@@ -596,7 +616,7 @@ if __name__ == '__main__':
     #run_and_plot(case='bai', discretizer='mech_discretizer', mesh='hex')
 
     test_all = False
-    test_all = True
+    #test_all = True
     cases_list = ['terzaghi', 'mandel', 'terzaghi_two_layers', 'bai']
     if test_all:
         for case in cases_list:

@@ -11,7 +11,9 @@ from darts.discretizer import (
     THMBoundaryCondition,
     elem_loc,
     poro_mech_discretizer,
+    stf_vector,
     thermoporo_mech_discretizer,
+    vector_matrix33,
 )
 from darts.discretizer import Stiffness as disc_stiffness
 from darts.discretizer import matrix33 as disc_matrix33
@@ -293,10 +295,7 @@ class UnstructReservoirMech:
             self.vol_strain_rhs = np.array(self.mesh.vol_strain_rhs, copy=True)
 
             # turn off some terms for evaluation of momentum equilibrium
-            vol_strain_tran = np.array(self.mesh.vol_strain_tran, copy=False)
-            vol_strain_rhs = np.array(self.mesh.vol_strain_rhs, copy=False)
-            vol_strain_tran[:] = 0.0
-            vol_strain_rhs[:] = 0.0
+            self.decouple_geomech()
 
             if zero_conduction:
                 self.darcy_tran = np.array(self.mesh.darcy_tran, copy=True)
@@ -346,6 +345,19 @@ class UnstructReservoirMech:
                     fourier_tran = np.array(self.mesh.fourier_tran, copy=False)
                     fourier_tran[:] = self.fourier_tran
 
+    def decouple_geomech(self):
+        '''
+        Turns off the mechanics -> flow coupling: the volumetric-strain terms of the mass (and energy)
+        balance are zeroed, so deformation no longer changes porosity and pressure. Call it after
+        turn_off_equilibrium, which restores these terms. Implemented for mech_discretizer only.
+        '''
+        if self.discretizer_name != 'mech_discretizer':
+            raise NotImplementedError(
+                'decouple_geomech is implemented for mech_discretizer only'
+            )
+        np.array(self.mesh.vol_strain_tran, copy=False)[:] = 0.0
+        np.array(self.mesh.vol_strain_rhs, copy=False)[:] = 0.0
+
     def apply_geomechanics_mode(self, physics=None, mode: int = 0):
         '''
         :param physics: None if mode is 0 or 1
@@ -389,11 +401,17 @@ class UnstructReservoirMech:
     def init_matrix_stiffness(self, props):
         self.unstr_discr.stiffness = {}
         self.unstr_discr.stf = {}
+        # elastic moduli per region, read by write_to_vtk for the pm_discretizer output
+        self.unstr_discr.E = {}
+        self.unstr_discr.nu = {}
         for id, prop in props.items():
             self.unstr_discr.stiffness[id] = prop['stiffness']
             self.unstr_discr.stf[id] = self.unstr_discr.get_stiffness_submatrices(
                 self.unstr_discr.stiffness[id]
             )
+            if 'E' in prop and 'nu' in prop:
+                self.unstr_discr.E[id] = prop['E']
+                self.unstr_discr.nu[id] = prop['nu']
 
     def init_pm_discretizer(self):
         self.unstr_discr.x_new = np.ones(
@@ -753,6 +771,19 @@ class UnstructReservoirMech:
             for key in self.boundary_conditions.keys():
                 self.boundary_conditions[key]['cells'] = []
 
+    @staticmethod
+    def gravity_direction_from_z_axis(z_axis_direction: str) -> str:
+        '''
+        Returns the gravity_direction of init_gravity() for idata.mesh.z_axis_direction:
+        gravity points along +z when the z axis points downwards (z is depth), along -z otherwise
+        '''
+        directions = {'downwards': 'z+', 'upwards': 'z-'}
+        if z_axis_direction not in directions:
+            raise ValueError(
+                f'Unknown z_axis_direction {z_axis_direction!r}, expected one of {list(directions)}'
+            )
+        return directions[z_axis_direction]
+
     def init_gravity(
         self,
         gravity_on: bool = False,
@@ -763,10 +794,12 @@ class UnstructReservoirMech:
         sets gravity vector in discretizer
         '''
         if gravity_on:
-            from scipy.constants import gravitational_constant
+            # standard acceleration of gravity (scipy's gravitational_constant is Newton's G)
+            from scipy.constants import g as standard_gravity
 
             if gravity_coeff is None:
-                g_coeff = gravitational_constant / 1e5  # convert units
+                # [m/s2] -> [bar/m per kg/m3], the density is applied in the engine
+                g_coeff = standard_gravity / 1e5
             else:
                 g_coeff = gravity_coeff
 
@@ -782,7 +815,7 @@ class UnstructReservoirMech:
         elif gravity_direction in ['z+', 'z-']:
             grav_vec = [0.0, 0.0, g_coeff]
         else:
-            raise ('Unknown gravity_direction', gravity_direction)
+            raise ValueError(f'Unknown gravity_direction {gravity_direction!r}')
         grav_vec = matrix(grav_vec, 1, 3)  # n_dims=3
         if self.discretizer_name == 'mech_discretizer':
             self.discr.grav_vec = grav_vec
@@ -850,101 +883,120 @@ class UnstructReservoirMech:
                 for prop in sub_obj.__dict__.keys():
                     val = sub_obj.__getattribute__(prop)
                     if val is not None:
-                        if np.isscalar(val):
+                        if np.isscalar(val):  # a single value
                             self.props[m][prop] = val
-                        elif len(val) == 1:
+                        elif len(val) == 1:  # a list/array of one value
                             self.props[m][prop] = val[0]
-                        else:
+                        else:  # a list/array
                             self.props[m][prop] = val[i]
-                    else:
-                        if (
+                    else:  # val is None
+                        # permeability can be given as the 'perm' tensor or as permx/permy/permz;
+                        # whichever is None is skipped (init_heterogeneous_properties uses 'perm'
+                        # if present, otherwise permx/permy/permz)
+                        if prop == 'perm':
+                            pass  # perm None -> permx/permy/permz are used instead
+                        elif (
                             prop in ['permx', 'permy', 'permz']
                             and 'perm' in self.props[m]
                         ):
-                            pass
+                            pass  # permx/y/z None -> the 'perm' tensor is used instead
                         else:
                             print('in set_props_tags: ', prop + ' is None')
                             exit(1)
 
     def init_heterogeneous_properties(self):
         '''
-        set matrix poperties using self.props[tag]
-        :return:
+        Set matrix properties from self.props[tag].
+
+        Properties are evaluated once per distinct tag and the per-cell arrays are
+        filled by indexing those, instead of looping over cells in Python: the tag
+        count is small (a handful of material regions) while the cell count is not.
         '''
         if self.discretizer_name == 'mech_discretizer':
+            m0, m1 = self.discr_mesh.region_ranges[elem_loc.MATRIX]
+            tags, tag_ids = np.unique(self.tags[m0:m1], return_inverse=True)
+
+            perms, biots, stfs, rconds, th_expns = [], [], [], [], []
+            poro = np.zeros(len(tags))
+            cs = np.zeros(len(tags))
+            hcap = np.zeros(len(tags))
+            for i, tag in enumerate(tags):
+                props = self.props[tag]
+                if 'perm' in props.keys():
+                    kx = ky = kz = props['perm']
+                else:
+                    kx, ky, kz = props['permx'], props['permy'], props['permz']
+                lam, mu = get_lambda_mu(props['E'], props['nu'])
+                perms.append(disc_matrix33(kx, ky, kz))
+                biots.append(disc_matrix33(props['biot']))
+                stfs.append(disc_stiffness(lam, mu))
+                if self.thermoporoelasticity:
+                    rconds.append(disc_matrix33(props['thermal_conductivity']))
+                    th_expns.append(disc_matrix33(props['th_expn']))
+                    hcap[i] = props['heat_capacity']
+                poro[i] = props['porosity']
+                cs[i] = get_rock_compressibility(
+                    kd=props['kd'], biot=props['biot'], poro0=props['porosity']
+                )
+
+            self.discr.perms = vector_matrix33([perms[i] for i in tag_ids])
+            self.discr.biots = vector_matrix33([biots[i] for i in tag_ids])
+            self.discr.stfs = stf_vector([stfs[i] for i in tag_ids])
+            if self.thermoporoelasticity:
+                self.discr.heat_conductions = vector_matrix33(
+                    [rconds[i] for i in tag_ids]
+                )
+                self.discr.thermal_expansions = vector_matrix33(
+                    [th_expns[i] for i in tag_ids]
+                )
+
             self.porosity = np.zeros(self.n_matrix + self.n_fracs)
             self.cs = np.zeros(self.n_matrix + self.n_fracs)
             self.hcap = np.zeros(self.n_matrix + self.n_fracs)
-            for _i, cell_id in enumerate(
-                range(
-                    self.discr_mesh.region_ranges[elem_loc.MATRIX][0],
-                    self.discr_mesh.region_ranges[elem_loc.MATRIX][1],
-                )
-            ):
-                tag = self.tags[cell_id]
-                E = self.props[tag]['E']
-                nu = self.props[tag]['nu']
-                biot = self.props[tag]['biot']
-                if 'perm' in self.props[tag].keys():
-                    kx = ky = kz = self.props[tag]['perm']
-                else:
-                    kx, ky, kz = (
-                        self.props[tag]['permx'],
-                        self.props[tag]['permy'],
-                        self.props[tag]['permz'],
-                    )
-                kd = self.props[tag]['kd']
-                poro = self.props[tag]['porosity']
-                if self.thermoporoelasticity:
-                    hcap = self.props[tag]['heat_capacity']
-                    rcond = self.props[tag]['thermal_conductivity']
-                    th_expn = self.props[tag]['th_expn']
-                lam, mu = get_lambda_mu(E, nu)
+            self.porosity[m0:m1] = poro[tag_ids]
+            self.cs[m0:m1] = cs[tag_ids]
+            if self.thermoporoelasticity:
+                self.hcap[m0:m1] = hcap[tag_ids]
 
-                self.discr.perms.append(disc_matrix33(kx, ky, kz))
-                self.discr.biots.append(disc_matrix33(biot))
-                self.discr.stfs.append(disc_stiffness(lam, mu))
-                if self.thermoporoelasticity:
-                    self.discr.heat_conductions.append(disc_matrix33(rcond))
-                    self.discr.thermal_expansions.append(disc_matrix33(th_expn))
-                    self.hcap[cell_id] = hcap
-                self.porosity[cell_id] = poro
-                self.cs[cell_id] = get_rock_compressibility(
-                    kd=kd, biot=biot, poro0=poro
-                )
         elif self.discretizer_name == 'pm_discretizer':
-            self.cs = np.zeros(
-                self.unstr_discr.mat_cells_tot + self.unstr_discr.frac_cells_tot
+            n_cells = self.unstr_discr.mat_cells_tot
+            self.cs = np.zeros(n_cells + self.unstr_discr.frac_cells_tot)
+            self.porosity = np.zeros(n_cells + self.unstr_discr.frac_cells_tot)
+            self.hcap = np.zeros(n_cells + self.unstr_discr.frac_cells_tot)
+
+            # the tag of a cell is its prop_id here, not self.tags
+            prop_ids = np.array(
+                [
+                    self.unstr_discr.mat_cell_info_dict[cell_id].prop_id
+                    for cell_id in range(n_cells)
+                ]
             )
-            self.porosity = np.zeros(
-                self.unstr_discr.mat_cells_tot + self.unstr_discr.frac_cells_tot
-            )
-            self.hcap = np.zeros(
-                self.unstr_discr.mat_cells_tot + self.unstr_discr.frac_cells_tot
-            )
-            for cell_id in range(self.unstr_discr.mat_cells_tot):
-                cell = self.unstr_discr.mat_cell_info_dict[cell_id]
-                E = self.props[cell.prop_id]['E']
-                nu = self.props[cell.prop_id]['nu']
-                biot = self.props[cell.prop_id]['biot']
-                if 'perm' in self.props[cell.prop_id].keys():
-                    kx = ky = kz = self.props[cell.prop_id]['perm']
+            tags, tag_ids = np.unique(prop_ids, return_inverse=True)
+
+            stfs, perms, biots = [], [], []
+            poro = np.zeros(len(tags))
+            cs = np.zeros(len(tags))
+            for i, tag in enumerate(tags):
+                props = self.props[tag]
+                if 'perm' in props.keys():
+                    kx = ky = kz = props['perm']
                 else:
-                    kx, ky, kz = (
-                        self.props[cell.prop_id]['permx'],
-                        self.props[cell.prop_id]['permy'],
-                        self.props[cell.prop_id]['permz'],
-                    )
-                kd = self.props[cell.prop_id]['kd']
-                poro = self.props[cell.prop_id]['porosity']
-                lam, mu = get_lambda_mu(E, nu)
-                self.pm.stfs.append(engine_stiffness(lam, mu))
-                self.pm.perms.append(engine_matrix33(kx, ky, kz))
-                self.pm.biots.append(engine_matrix33(biot))
-                self.cs[cell_id] = get_rock_compressibility(
-                    kd=kd, biot=biot, poro0=poro
+                    kx, ky, kz = props['permx'], props['permy'], props['permz']
+                lam, mu = get_lambda_mu(props['E'], props['nu'])
+                stfs.append(engine_stiffness(lam, mu))
+                perms.append(engine_matrix33(kx, ky, kz))
+                biots.append(engine_matrix33(props['biot']))
+                poro[i] = props['porosity']
+                cs[i] = get_rock_compressibility(
+                    kd=props['kd'], biot=props['biot'], poro0=props['porosity']
                 )
-                self.porosity[cell_id] = poro
+
+            for i in tag_ids:
+                self.pm.stfs.append(stfs[i])
+                self.pm.perms.append(perms[i])
+                self.pm.biots.append(biots[i])
+            self.cs[:n_cells] = cs[tag_ids]
+            self.porosity[:n_cells] = poro[tag_ids]
 
     def set_uniform_initial_conditions(self, idata: InputData):
         self.u_init = idata.initial.initial_displacements
@@ -1038,7 +1090,33 @@ class UnstructReservoirMech:
 
     def init_wells(self):
         # # Add wells to the DARTS mesh object and sort connection (DARTS related):
-        self.mesh.add_wells_mpfa(ms_well_vector(self.wells), self.P_VAR)
+        if self.discretizer_name == 'mech_discretizer':
+            # mesh.depth is filled with the centroid z below, so the hydrostatic term of the well
+            # chain takes the signed z-component of the reservoir gravity vector: positive when
+            # the z axis points downwards, negative when it points upwards
+            g_constant = self.discr.grav_vec.values[2]
+        else:
+            g_constant = abs(getattr(self, 'grav', 9.80665e-5))
+        # add_wells_mpfa takes the depths of the well segments and their hydrostatic terms from
+        # mesh.depth, so the reservoir-cell depths are written there first. The well head depth is
+        # set here as well: add_perforation runs before the discretizer fills the cell depths.
+        if self.discretizer_name == 'mech_discretizer' and hasattr(self, 'discr_mesh'):
+            depth = np.asarray(self.mesh.depth)
+            for i, c in enumerate(self.discr_mesh.centroids[: self.n_matrix]):
+                depth[i] = c.values[2]
+            for w in self.wells:
+                if w.perforations:
+                    # The head connects to the first body segment (the one of perforations[0]),
+                    # and the well control equation relates their pressures without a gravity
+                    # term. The head is therefore placed at the depth of that segment, so that
+                    # connection has no hydrostatic term; a non-zero one would be an unbalanced
+                    # source in the mass balance of the first segment. The minimum or maximum
+                    # depth over the perforations would differ from it in general and would
+                    # depend on the direction of the z axis.
+                    first_perf_res_id = int(w.perforations[0][1])
+                    w.well_head_depth = float(depth[first_perf_res_id])
+                    w.well_body_depth = w.well_head_depth
+        self.mesh.add_wells_mpfa(ms_well_vector(self.wells), self.P_VAR, g_constant)
         if self.discretizer_name == 'mech_discretizer':
             if self.thermoporoelasticity:
                 self.mesh.reverse_and_sort_pme_mech_discretizer()
@@ -1162,39 +1240,119 @@ class UnstructReservoirMech:
             #     assert((abs(sum[:3,:3]) < 1.E-10).all())
         f.close()
 
-    def add_well(self, name, depth):
-        """
-        Class method which adds wells heads to the reservoir (Note: well head is not equal to a perforation!)
-        :param name:
-        :param depth:
-        :return:
-        """
+    def add_well(self, well_name: str):
+        '''
+        Function to create an ms_well object and add it to the list of wells
+
+        :param well_name: Well name
+        :type well_name: str
+        '''
         well = ms_well()
-        well.name = name
-        well.segment_volume = 0.0785 * 40  # 2.5 * pi * 0.15**2 / 4
-        well.well_head_depth = depth
-        well.well_body_depth = depth
+        well.name = well_name
+        well.ms_type = ms_well.MS_Type.EPM
+
         well.well_transmissibility = 1e5
-        well.segment_depth_increment = 1
+        well.segment_volume = 0.0785 * 40  # 2.5 * pi * 0.15**2 / 4
+        well.well_head_depth = 0
+        well.well_body_depth = 0
+        # Since segment_volume is hard-coded, well_body_depth will is not used.
+        well.segment_depth_increment = 0
+
         self.wells.append(well)
+
         return 0
 
-    def add_perforation(self, well, res_cell_idx: int, well_index: float):
-        """
+    def get_well(self, well_name: str):
+        '''
+        Find well by name
+
+        :param well_name: Well name
+        :returns: :class:`ms_well` object
+        '''
+        for w in self.wells:
+            if w.name == well_name:
+                return w
+
+    def add_perforation(
+        self,
+        well_name: str,
+        res_cell_idx: int,
+        well_diameter: float = 0.3048,
+        well_index: float = None,
+        well_indexD: float = None,
+        skin: float = 0.0,
+        ms_epm: bool = False,
+        verbose: bool = False,
+    ):
+        '''
         Function to add a perforation to the well
 
-        :param well: data object which contains data of the desired well
-        :param res_cell_idx: index of reservoir cell to be perforated
+        :param well_name: Name of well to add perforation to
+        :type well_name: str
+        :param res_cell_idx: Index of reservoir cell to be perforated
         :type res_cell_idx: int
-        :param well_index: well index (productivity index)
+        :param well_diameter: Internal diameter of the wellbore
+        :type well_diameter: float
+        :param well_index: Well index, default is calculated inside
         :type well_index: float
-        :return:
-        """
-        well_block = 0
+        :param well_indexD: Thermal well index, default is calculated inside
+        :type well_indexD: float
+        :param skin: Skin factor
+        :type skin: float
+        :param ms_epm: Whether the EPM well model uses a separate well segment per perforation or not (a single well segment for all perforations).
+        :type ms_epm: bool
+        :param verbose: Switch to set verbose level
+        :type verbose: bool
+        '''
+        well = self.get_well(well_name)
+
+        perforations = np.array(well.perforations, dtype=int)
+        # res_cell_idx has index=1 in the perforation tuple: (well_block, res_cell_idx, well_index, well_indexD)
+        res_indices = perforations[:, 1] if len(well.perforations) > 0 else []
+        if res_cell_idx in res_indices:
+            print(
+                "There are at least 2 wells locating in the same grid block!!! The mesh file should be modified!"
+            )
+            exit()
+
+        # update wellhead and well body depths
+        res_indices = np.append(res_indices, res_cell_idx).astype(
+            int
+        )  # add current cell to previous perforation list
+        # set well depth to the top perforation depth
+        well.well_head_depth = np.array(self.mesh.depth, copy=False)[res_indices].min()
+        well.well_body_depth = well.well_head_depth
+
+        # The mechanical unstructured reservoir uses self.discr (the C++
+        # mech discretizer), which has no calc_equivalent_well_index. Callers must
+        # therefore supply well_index explicitly; the thermal well index defaults to
+        # zero when not given (only used by thermoporoelastic physics).
+        if well_index is None:
+            raise ValueError(
+                "well_index must be provided for the mechanical unstructured reservoir "
+                "(the mech discretizer has no calc_equivalent_well_index)."
+            )
+        if well_indexD is None:
+            well_indexD = 0.0
+
+        assert well_index >= 0
+        assert well_indexD >= 0
+
+        # set well segment index (well block) equal to index of perforation layer
+        if ms_epm:
+            well_block = len(well.perforations)
+        else:
+            well_block = 0
+
         well.perforations = well.perforations + [
-            (well_block, res_cell_idx, well_index, 0.0)
+            (well_block, res_cell_idx, well_index, well_indexD)
         ]
-        return 0
+
+        if verbose:
+            print(
+                f'Added perforation for well {well.name} to block {res_cell_idx:d} with WI={well_index:f}, WID={well_indexD:f}'
+            )
+        return
 
     def get_props_over_output(self, property_array, ith_step, engine):
         if self.discretizer_name == 'mech_discretizer':
@@ -1307,14 +1465,14 @@ class UnstructReservoirMech:
         self.write_pvd_file(ith_step, time, output_directory)
 
     def write_to_vtk_mech_discretizer(self, output_directory, ith_step, engine, dt):
-        """
+        '''
         Class method which writes output of unstructured grid to VTK format
         :param output_directory: directory of output files
         :param property_array: np.array containing all cell properties (N_cells x N_prop)
         :param cell_property: list with property names (visible in ParaView (format strings)
         :param ith_step: integer containing the output step
         :return:
-        """
+        '''
         assert self.discretizer_name == 'mech_discretizer'
 
         # First check if output directory already exists:
@@ -1384,14 +1542,14 @@ class UnstructReservoirMech:
         return 0
 
     def write_to_vtk_pm_discretizer(self, output_directory, ith_step, engine, dt):
-        """
+        '''
         Class method which writes output of unstructured grid to VTK format
         :param output_directory: directory of output files
         :param property_array: np.array containing all cell properties (N_cells x N_prop)
         :param cell_property: list with property names (visible in ParaView (format strings)
         :param ith_step: integer containing the output step
         :return:
-        """
+        '''
         assert self.discretizer_name == 'pm_discretizer'
 
         # First check if output directory already exists:
@@ -1412,8 +1570,9 @@ class UnstructReservoirMech:
         np.array(engine.fluxes, copy=False)
         # fluxes_n = np.array(physics.engine.fluxes_n, copy=False)
         np.array(engine.fluxes_biot, copy=False)
-        # vels = self.reconstruct_velocities(fluxes[physics.engine.P_VAR::physics.engine.N_VARS],
-        #                                  fluxes_biot[physics.engine.P_VAR::physics.engine.N_VARS])
+        # engine_n_vars = physics.engine.get_n_vars()
+        # vels = self.reconstruct_velocities(fluxes[physics.engine.P_VAR::engine_n_vars],
+        #                                  fluxes_biot[physics.engine.P_VAR::engine_n_vars])
         self.mech_operators.eval_porosities(engine.X, self.mesh.bc)
         self.mech_operators.eval_stresses(
             engine.fluxes,
@@ -1523,14 +1682,18 @@ class UnstructReservoirMech:
                         cell_data['poisson'] = []
                     cell_data['E'].append(np.zeros(cell_size, dtype=np.float64))
                     cell_data['poisson'].append(np.zeros(cell_size, dtype=np.float64))
-                    E = self.unstr_discr.E
-                    poisson = self.unstr_discr.nu
-                    cell_data['E'][-1][:] = E[
-                        list(E.keys())[0]
-                    ]  # TODO for heterogeneous
-                    cell_data['poisson'][-1][:] = poisson[
-                        list(poisson.keys())[0]
-                    ]  # TODO for heterogeneous
+                    # elastic moduli of the region of every cell, NaN for a region without E, nu
+                    E = getattr(self.unstr_discr, 'E', {})
+                    poisson = getattr(self.unstr_discr, 'nu', {})
+                    regions = [
+                        cell.prop_id
+                        for cell in self.unstr_discr.mat_cell_info_dict.values()
+                        if cell.geometry_type == ith_geometry
+                    ]
+                    cell_data['E'][-1][:] = [E.get(r, np.nan) for r in regions]
+                    cell_data['poisson'][-1][:] = [
+                        poisson.get(r, np.nan) for r in regions
+                    ]
 
                     if 'eff_stress' not in cell_data:
                         cell_data['eff_stress'] = []

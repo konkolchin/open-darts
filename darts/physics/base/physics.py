@@ -10,6 +10,7 @@ from functools import total_ordering
 from typing import Any
 
 import numpy as np
+from scipy.interpolate import interp1d
 
 from darts.engines import *
 from darts.interpolators import *
@@ -21,7 +22,6 @@ from darts.physics.base.operator_evaluator import (
     WellCtrlOperators,
     WellOperators,
 )
-from darts.tools.interpolation import linear_interp_extrapolate
 from darts.tools.obl_cache import OblCacheCodec
 
 
@@ -548,7 +548,8 @@ class PhysicsBase:
         on the extended axes set (primary OBL axes + one axis per history field); the thermal_var
         interpolator always stays on the primary PT axes.
 
-        :param platform: Switch for CPU/GPU engine, 'cpu' (default) or 'gpu'
+        :param platform: Switch for CPU/GPU engine, 'cpu' (default) or 'gpu'; the property (output) and
+            well-control interpolators are created on the CPU on both platforms
         :type platform: str
         :param itor_type: Type of interpolation method, 'multilinear' (default) or 'linear'
         :type itor_type: str
@@ -600,12 +601,15 @@ class PhysicsBase:
                 is_barycentric=is_barycentric,
             )
 
+            # The property (output) operators are only evaluated from host code (Output, reporting), never by the
+            # engine, and a device interpolator allocates its hypercube hashmap on the GPU for every region: keep
+            # these interpolators on the CPU whatever the engine platform.
             self.property_itor[region], _ = self.create_interpolator(
                 self.property_operators[region],
                 n_ops=self.n_ops,
                 axes_step=operator_axes_step,
                 axes_origin=operator_axes_origin,
-                platform=platform,
+                platform='cpu',
                 algorithm=itor_type,
                 precision=itor_precision,
                 timer_name=f'property {region:d} interpolation',
@@ -626,13 +630,16 @@ class PhysicsBase:
             is_barycentric=is_barycentric,
         )
 
+        # The well-control operators are only ever evaluated on the host, one well state at a time (well
+        # constraints, rates, well-head Jacobian rows): a device interpolator turns each of those into a
+        # host->device->host round trip, so keep this interpolator on the CPU whatever the engine platform.
         self.well_ctrl_itor, self.n_well_ctrl_itor_ops = self.create_interpolator(
             self.well_ctrl_operators,
             n_ops=self.well_ctrl_operators.n_ops,
             axes_step=operator_axes_step,
             axes_origin=operator_axes_origin,
             timer_name='well controls interpolation',
-            platform=platform,
+            platform='cpu',
             algorithm=itor_type,
             precision=itor_precision,
             is_barycentric=is_barycentric,
@@ -934,22 +941,32 @@ class PhysicsBase:
         for ith_var, variable in enumerate(self.vars):
             if variable == "enthalpy" and "enthalpy" not in input_distribution.keys():
                 # Temperature was provided; interpolate P and T to compute enthalpies
-                pressure = linear_interp_extrapolate(
-                    depths, input_depth, input_distribution["pressure"]
+                p_itor = interp1d(
+                    input_depth,
+                    input_distribution["pressure"],
+                    kind="linear",
+                    fill_value="extrapolate",
                 )
+                pressure = p_itor(depths)
 
-                temperature = linear_interp_extrapolate(
-                    depths, input_depth, input_distribution["temperature"]
+                t_itor = interp1d(
+                    input_depth,
+                    input_distribution["temperature"],
+                    kind="linear",
+                    fill_value="extrapolate",
                 )
+                temperature = t_itor(depths)
 
-                zi = np.array(
-                    [
-                        linear_interp_extrapolate(
-                            depths, input_depth, input_distribution[comp]
-                        )
-                        for comp in self.components[:-1]
-                    ]
-                )
+                z_itors = [
+                    interp1d(
+                        input_depth,
+                        input_distribution[comp],
+                        kind="linear",
+                        fill_value="extrapolate",
+                    )
+                    for comp in self.components[:-1]
+                ]
+                zi = np.array([z_itor(depths) for z_itor in z_itors])
 
                 values = np.empty(mesh.n_res_blocks)
                 for j in range(mesh.n_res_blocks):
@@ -962,9 +979,13 @@ class PhysicsBase:
                     )
             else:
                 # Interpolate primary variable directly
-                values = linear_interp_extrapolate(
-                    depths, input_depth, input_distribution[variable]
+                itor = interp1d(
+                    input_depth,
+                    input_distribution[variable],
+                    kind="linear",
+                    fill_value="extrapolate",
                 )
+                values = itor(depths)
 
             values = np.resize(np.asarray(values), mesh.n_res_blocks)
             np.asarray(mesh.initial_state)[ith_var :: self.n_vars] = values
@@ -1268,9 +1289,10 @@ class PhysicsBase:
             # onto one cache file.
             signature_evaluator = getattr(evaluator, "_serial_evaluator", evaluator)
 
-            def cache_filename(itor_token: str) -> str:
+            def cache_filename(itor_token: str, region_token: str = None) -> str:
                 """Cache file name for one spelling of the interpolator identity token."""
-                itor_cache_signature = f"{type(signature_evaluator).__name__}{itor_token}{precision}_{n_dims:d}_{signature_n_ops:d}_{region}"
+                region_tag = region if region_token is None else region_token
+                itor_cache_signature = f"{type(signature_evaluator).__name__}{itor_token}{precision}_{n_dims:d}_{signature_n_ops:d}_{region_tag}"
                 # geenral itor has a different point_data format
                 if general:
                     itor_cache_signature += "_general_"
@@ -1300,13 +1322,21 @@ class PhysicsBase:
             # orphaned and none is duplicated on disk.
             itor_cache_filename = cache_filename('_')
             if not os.path.exists(itor_cache_filename):
-                legacy_cache_filename = cache_filename('_adaptive_')
-                if os.path.exists(legacy_cache_filename):
-                    print(
-                        "Using OBL cache written under the legacy signature:",
-                        legacy_cache_filename,
-                    )
-                    itor_cache_filename = legacy_cache_filename
+                # Older spellings of the same interpolator identity, most recent first.
+                # The untagged-region spelling is only safe for a single-region physics:
+                # with several regions every one of them would fall back onto that one
+                # file, which is exactly the collision the region tag prevents.
+                legacy_names = [cache_filename('_adaptive_')]
+                if region and len(getattr(self, 'regions', [0])) <= 1:
+                    legacy_names.append(cache_filename('_', region_token=''))
+                for legacy_cache_filename in legacy_names:
+                    if os.path.exists(legacy_cache_filename):
+                        print(
+                            "Using OBL cache written under the legacy signature:",
+                            legacy_cache_filename,
+                        )
+                        itor_cache_filename = legacy_cache_filename
+                        break
             # Fast path: a numpy-array snapshot (.keys.npy / .vals.npy) next to the
             # pickle restores the whole cache with one bulk read + a single C++ copy,
             # skipping pickle's per-point object graph and the dict round-trip. Used

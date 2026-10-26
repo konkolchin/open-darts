@@ -27,7 +27,274 @@ from darts.nonlinear_solvers import (  # noqa: E402
     NewtonSpec,
     Norm,
     OBLBoundsSpec,
+    RecoverableEvaluationError,
 )
+
+
+# ------------------------------------------------------ recoverable evaluation errors
+def test_recoverable_error_in_assembly_fails_the_step(make_newton):
+    # e.g. a flash failure raised by a property evaluator during OBL point
+    # generation inside engine.assemble_linear_system of the 2nd iterate
+    solver, model, engine, log = make_newton(res_seq=[1.0, 1e-1, 1e-9])
+    assemble = engine.assemble_linear_system
+
+    def failing_assemble(dt):
+        if engine.n_apply_update == 1:
+            raise RecoverableEvaluationError("flash did not converge")
+        return assemble(dt)
+
+    engine.assemble_linear_system = failing_assemble
+    assert solver.run_timestep(1.0, 0.0) is False
+    assert "flash did not converge" in solver.status.divergence_reason
+    assert "recoverable evaluation error" in solver._failure_message(1.0)
+    assert engine.n_apply_update == 1
+    assert solver.stats.n_timesteps_wasted == 1
+    assert log[-1] == "post_newtonloop:0"  # the ordinary failed-step path
+
+
+def test_recoverable_error_in_newton_update_fails_the_step(make_newton):
+    # e.g. a flash failure in OBL point generation of engine.correct_thermal
+    # (thermal-variable correction of a PH/PS formulation) during the update
+    solver, model, engine, log = make_newton(res_seq=[1.0, 1e-1, 1e-9])
+    correct_thermal = engine.correct_thermal
+
+    def failing_correct_thermal():
+        raise RecoverableEvaluationError("thermal correction flash failure")
+
+    engine.correct_thermal = failing_correct_thermal
+    assert solver.run_timestep(1.0, 0.0) is False
+    assert "thermal correction flash failure" in solver.status.divergence_reason
+    assert engine.n_apply_update == 0
+    assert log[-1] == "post_newtonloop:0"
+    engine.correct_thermal = correct_thermal
+
+
+def test_recoverable_error_in_pre_routine_fails_the_step(make_newton):
+    spec = NewtonSpec()
+
+    def reject(solver, dt, t, iteration):
+        raise RecoverableEvaluationError("residual guard")
+
+    spec.pre_routines.append(reject)
+    solver, model, engine, log = make_newton(spec=spec, res_seq=[1.0, 1e-9])
+    assert solver.run_timestep(1.0, 0.0) is False
+    assert engine.n_apply_update == 0  # raised before the first update
+    assert "residual guard" in solver.status.divergence_reason
+    assert log[-1] == "post_newtonloop:0"
+
+
+def test_stop_dangling_timers_stops_only_running_timers():
+    # an exception unwinding through C++ assembly leaves its timers started;
+    # the Newton driver must stop exactly those (once or repeatedly started)
+    import time
+
+    from darts.engines import timer_node
+    from darts.nonlinear_solvers.newton import NewtonSolver
+
+    root = timer_node()
+    for name in ("idle", "once", "twice"):
+        root.node[name] = timer_node()
+    root.node["once"].node["child"] = timer_node()
+    root.node["idle"].start()
+    root.node["idle"].stop()
+    root.node["once"].start()
+    root.node["once"].node["child"].start()
+    root.node["twice"].start()
+    root.node["twice"].start()
+    idle_before = root.node["idle"].get_timer()
+
+    NewtonSolver._stop_dangling_timers(root)
+
+    frozen = {k: root.node[k].get_timer() for k in ("idle", "once", "twice")}
+    frozen["child"] = root.node["once"].node["child"].get_timer()
+    time.sleep(0.01)
+    assert root.node["idle"].get_timer() == idle_before
+    for k in ("idle", "once", "twice"):
+        assert root.node[k].get_timer() == frozen[k] >= 0.0
+    assert root.node["once"].node["child"].get_timer() == frozen["child"] >= 0.0
+
+
+def test_other_exceptions_still_propagate(make_newton):
+    spec = NewtonSpec()
+
+    def broken(solver, dt, t, iteration):
+        raise ValueError("model bug")
+
+    spec.pre_routines.append(broken)
+    solver, model, engine, log = make_newton(spec=spec, res_seq=[1.0, 1e-9])
+    with pytest.raises(ValueError, match="model bug"):
+        solver.run_timestep(1.0, 0.0)
+
+
+# ------------------------------------------------------ divergence guard
+def test_guard_off_by_default_runs_to_the_budget(make_newton):
+    # exploding residuals, no thresholds: the historical behaviour -- every
+    # iteration is solved and applied until max_iterations
+    spec = NewtonSpec(max_iterations=4)
+    solver, model, engine, log = make_newton(
+        spec=spec, res_seq=[1e-3, 1.0, 1e3, 1e6, 1e9]
+    )
+    assert solver.run_timestep(1.0, 0.0) is False
+    assert solver.status.divergence_reason is None
+    assert engine.n_apply_update == 4
+    assert solver.stats.n_divergence_aborts == 0
+
+
+def test_residual_growth_aborts_before_the_solve(make_newton):
+    spec = NewtonSpec(max_residual_growth=1e3, residual_growth_floor=1e-6)
+    solver, model, engine, log = make_newton(spec=spec, res_seq=[1e-3, 1e-1, 1e2])
+    assert solver.run_timestep(1.0, 0.0) is False
+    # iterates 1 and 2 were solved and applied (1e-1 is 100x, below 1e3);
+    # iterate 3 is 1e5x the smallest: rejected without a linear solve
+    assert log.count("solve_linear:0") == 2
+    assert engine.n_apply_update == 2
+    assert "smallest of this timestep" in solver.status.divergence_reason
+    assert solver.status.linear_solver_rc == 0  # not a linear failure
+    assert model._linear_solver_rc_last == 0
+    assert "divergence guard" in solver._failure_message(1.0)
+    assert solver.stats.n_timesteps_wasted == 1
+    assert solver.stats.n_divergence_aborts == 1
+    assert log[-1] == "post_newtonloop:0"  # the ordinary failed-step path
+
+
+def test_residual_growth_floor_defaults_to_100x_tolerance(make_newton):
+    # 5e-2 is 500x the first residual but below the floor 100 * 1e-3 = 0.1:
+    # not judged, and the step then converges
+    spec = NewtonSpec(tolerance=1e-3, max_residual_growth=1e2)
+    solver, model, engine, log = make_newton(spec=spec, res_seq=[1e-4, 5e-2, 1e-9])
+    assert solver.run_timestep(1.0, 0.0) is True
+    assert solver.status.divergence_reason is None
+
+
+def test_max_residual_is_absolute(make_newton):
+    spec = NewtonSpec(max_residual=10.0)
+    solver, model, engine, log = make_newton(spec=spec, res_seq=[1.0, 50.0])
+    assert solver.run_timestep(1.0, 0.0) is False
+    assert "max_residual" in solver.status.divergence_reason
+    assert log.count("solve_linear:0") == 1
+
+
+def test_converged_iterate_is_never_guarded(make_newton):
+    # the convergence test precedes the guard: a residual below tolerance is
+    # accepted even with an impossible growth bound
+    spec = NewtonSpec(
+        tolerance=1e-3, max_residual_growth=1.0, residual_growth_floor=0.0
+    )
+    solver, model, engine, log = make_newton(spec=spec, res_seq=[1e-3, 1e-9])
+    assert solver.run_timestep(1.0, 0.0) is True
+
+
+def test_update_ratio_rejects_the_update_before_it_is_applied(make_newton):
+    spec = NewtonSpec(max_update_ratio=4.0)
+    solver, model, engine, log = make_newton(spec=spec, res_seq=[1.0, 1.0], n_vars=2)
+    model.ts_control.eta = np.array([1.0, 0.1])
+    engine.X = np.array([[100.0, 0.5], [100.0, 0.5]]).ravel()
+    engine.dX = np.array([[0.0, 0.5], [0.0, 0.05]]).ravel()  # 5x eta[1] in block 0
+    assert solver.run_timestep(1.0, 0.0) is False
+    assert log.count("solve_linear:0") == 1  # the solve happened ...
+    assert engine.n_apply_update == 0  # ... the update was never applied
+    assert "variable 1" in solver.status.divergence_reason
+    assert "5x" in solver.status.divergence_reason
+    assert solver.stats.n_divergence_aborts == 1
+
+
+def test_update_ratio_per_variable_exempts_inf_and_none(make_newton):
+    spec = NewtonSpec(max_update_ratio=[None, 4.0])
+    solver, model, engine, log = make_newton(spec=spec, res_seq=[1.0, 1e-9], n_vars=2)
+    model.ts_control.eta = np.array([1.0, 0.1])
+    engine.X = np.array([100.0, 0.5])
+    engine.dX = np.array([1e6, 0.1])  # pressure exempt, z within 1x eta
+    assert solver.run_timestep(1.0, 0.0) is True
+    assert engine.n_apply_update == 1
+
+
+def test_hypercube_jump_judges_the_raw_direction_on_the_obl_grid(make_newton):
+    spec = NewtonSpec(max_hypercube_jump=[None, 10])
+    solver, model, engine, log = make_newton(spec=spec, res_seq=[1.0, 1e-9], n_vars=2)
+    model.physics.axes_origin = [0.0, 0.0]
+    model.physics.axes_step = [1.0, 0.01]
+    engine.X = np.array([5.0, 0.5])
+    engine.dX = np.array([0.0, -0.5])  # proposes z = 1.0: 50 cubes away
+    assert solver.run_timestep(1.0, 0.0) is False
+    assert "hop 50 OBL hypercubes along axis 1" in solver.status.divergence_reason
+    assert engine.n_apply_update == 0
+    # the obl_bounds box the engine clamps into does NOT hide the excursion: the
+    # raw direction is judged (parking the block on the box face would make the
+    # hop look like 10 cubes and let the diverging update through)
+    spec2 = NewtonSpec(
+        max_hypercube_jump=[None, 10],
+        obl_bounds=OBLBoundsSpec(mode="obl_axes", axis_min=None, axis_max=[None, 0.6]),
+    )
+    solver, model, engine, log = make_newton(spec=spec2, res_seq=[1.0, 1e-9], n_vars=2)
+    model.physics.axes_origin = [0.0, 0.0]
+    model.physics.axes_step = [1.0, 0.01]
+    engine.X = np.array([5.0, 0.5])
+    engine.dX = np.array([0.0, -0.5])
+    assert solver.run_timestep(1.0, 0.0) is False
+    assert "hop 50 OBL hypercubes along axis 1" in solver.status.divergence_reason
+    engine.dX = np.array([0.0, -0.1])  # 10 cubes: allowed (bound is inclusive)
+    assert solver.run_timestep(1.0, 0.0) is True
+
+
+def test_nonfinite_update_is_rejected(make_newton):
+    spec = NewtonSpec(max_update_ratio=4.0)
+    solver, model, engine, log = make_newton(spec=spec, res_seq=[1.0, 1.0], n_vars=2)
+    engine.X = np.array([1.0, 0.5])
+    engine.dX = np.array([np.nan, 0.0])
+    assert solver.run_timestep(1.0, 0.0) is False
+    assert "not finite" in solver.status.divergence_reason
+    assert engine.n_apply_update == 0
+
+
+def test_per_variable_bound_length_mismatch_raises(make_newton):
+    spec = NewtonSpec(max_update_ratio=[1.0, 2.0, 3.0])
+    solver, model, engine, log = make_newton(spec=spec, res_seq=[1.0, 1.0], n_vars=2)
+    engine.X = np.array([1.0, 0.5])
+    engine.dX = np.array([0.0, 0.0])
+    with pytest.raises(ValueError, match="expected n_vars = 2"):
+        solver.run_timestep(1.0, 0.0)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        dict(max_residual=0.0),
+        dict(max_residual_growth=-1.0),
+        dict(residual_growth_floor=float("nan")),
+        dict(max_update_ratio=[1.0, 0.0]),
+        dict(max_hypercube_jump=-5),
+    ],
+)
+def test_guard_spec_validation(kwargs):
+    with pytest.raises(ValueError):
+        NewtonSpec(**kwargs)
+
+
+def test_guard_fields_are_keyword_only():
+    with pytest.raises(TypeError):
+        NewtonSpec(
+            1e-3,
+            100.0,
+            20,
+            1e-3,
+            Norm.L2,
+            1,
+            [],
+            [],
+            [],
+            ChopSpec(),
+            OBLBoundsSpec(),
+            10.0,
+        )
+
+
+def test_guard_spec_serializes():
+    spec = NewtonSpec(max_residual_growth=1e3, max_update_ratio=[None, 4.0])
+    d = spec.to_dict()
+    assert d["max_residual_growth"] == 1e3
+    assert d["max_update_ratio"] == [None, 4.0]
+    assert spec.divergence_guard_active
+    assert not NewtonSpec().divergence_guard_active
 
 
 # ----------------------------------------------------------------- F3 hooks
@@ -104,11 +371,15 @@ def test_linear_failure_aborts_and_marks_wasted(make_newton, rc, reason):
     assert solver.stats.n_timesteps_wasted == 1
 
 
-def test_linear_nonconvergence_accepted_by_default(make_newton):
+def test_linear_nonconvergence_accept_policy(make_newton):
     # rc 3 = "budget exhausted, iterate usable" (unified solve() convention).
-    # Default policy 'accept': the step is applied, iterations are counted, the
+    # Policy 'accept': the step is applied, iterations are counted, the
     # occurrence is recorded, and the timestep converges on the Newton gate.
-    solver, model, engine, _ = make_newton(res_seq=[1.0, 1e-12], solve_rcs=[3])
+    spec = NewtonSpec()
+    spec.on_linear_nonconvergence = "accept"
+    solver, model, engine, _ = make_newton(
+        spec=spec, res_seq=[1.0, 1e-12], solve_rcs=[3]
+    )
     converged = solver.run_timestep(1.0, 0.0)
     assert converged is True
     assert solver.status.linear_solver_rc == 0  # accepted: not a failure
@@ -117,10 +388,10 @@ def test_linear_nonconvergence_accepted_by_default(make_newton):
     assert engine.n_apply_update >= 1  # the inexact step WAS applied
 
 
-def test_linear_nonconvergence_cut_policy(make_newton):
-    spec = NewtonSpec()
-    spec.on_linear_nonconvergence = "cut"
-    solver, model, engine, _ = make_newton(spec=spec, res_seq=[1.0, 1.0], solve_rcs=[3])
+def test_linear_nonconvergence_cut_by_default(make_newton):
+    # Default policy 'cut': the non-converged solve fails the attempt and the
+    # inexact update is never applied.
+    solver, model, engine, _ = make_newton(res_seq=[1.0, 1.0], solve_rcs=[3])
     converged = solver.run_timestep(1.0, 0.0)
     assert converged is False
     assert solver.status.linear_solver_rc == 3
@@ -130,7 +401,7 @@ def test_linear_nonconvergence_cut_policy(make_newton):
 
 
 def test_on_linear_nonconvergence_validation():
-    assert NewtonSpec().on_linear_nonconvergence == "accept"
+    assert NewtonSpec().on_linear_nonconvergence == "cut"
     spec = NewtonSpec()
     spec.on_linear_nonconvergence = "abort"  # invalid
     with pytest.raises(ValueError, match="on_linear_nonconvergence"):
@@ -143,8 +414,11 @@ def test_on_linear_nonconvergence_is_keyword_only():
     # silently rebind existing call sites.
     spec = NewtonSpec(1e-3, 100.0, 20, 1e-3, Norm.L2, 1, [], [], [], ChopSpec())
     assert isinstance(spec.chop, ChopSpec)
-    assert spec.on_linear_nonconvergence == "accept"
-    assert NewtonSpec(on_linear_nonconvergence="cut").on_linear_nonconvergence == "cut"
+    assert spec.on_linear_nonconvergence == "cut"
+    assert (
+        NewtonSpec(on_linear_nonconvergence="accept").on_linear_nonconvergence
+        == "accept"
+    )
 
 
 @pytest.mark.parametrize("rc", [1, 2])
@@ -164,8 +438,13 @@ def test_hard_failure_ignores_accept_policy(make_newton, rc):
 
 def test_nonconvergence_then_success_counts_both(make_newton):
     # A non-converged solve followed by a converged one: iterations from both
-    # are accounted, and only the first is counted as non-converged.
-    solver, model, engine, _ = make_newton(res_seq=[1.0, 1.0, 1e-12], solve_rcs=[3, 0])
+    # are accounted, and only the first is counted as non-converged. Needs the
+    # 'accept' policy: under the default 'cut' the first solve ends the attempt.
+    spec = NewtonSpec()
+    spec.on_linear_nonconvergence = "accept"
+    solver, model, engine, _ = make_newton(
+        spec=spec, res_seq=[1.0, 1.0, 1e-12], solve_rcs=[3, 0]
+    )
     assert solver.run_timestep(1.0, 0.0) is True
     assert solver.status.n_linear_nonconverged == 1
     assert solver.status.n_linear == 2 * engine.get_last_linear_iters()
@@ -391,3 +670,23 @@ def test_mechanics_thermal_third_component(make_mechanics):
     # i=0: third=1.0 >= tol -> NOT converged (does an update); i=1: third tiny -> converge
     assert engine.n_apply_update == 1
     assert engine.dev_e == 1e-9  # thermal component recorded on the engine
+
+
+def test_stats_line_goes_to_the_darts_stream_and_to_stdout(capsys, monkeypatch):
+    """The totals of a run() invocation: print() reaches stdout only, so the log
+    of a redirected run needs the darts output stream as well."""
+    from darts.engines import logging
+    from darts.nonlinear_solvers.base import SolverStats
+
+    logged = []
+    monkeypatch.setattr(logging, "info", logged.append)
+    stats = SolverStats()
+    stats.n_timesteps_total, stats.n_newton_total, stats.n_linear_total = 21, 28, 332
+    line = "----- TS = 21(0), NI = 28(0), LI = 332(0) -----"
+
+    assert stats.format() == line
+    stats.log()
+    assert logged == [line]  # darts output stream -> run.log
+    assert capsys.readouterr().out == ""
+    stats.print()
+    assert capsys.readouterr().out == line + "\n"  # console

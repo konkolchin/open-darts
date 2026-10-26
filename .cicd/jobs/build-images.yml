@@ -1,4 +1,4 @@
-docker-image-builder:
+docker-builder-image:
   stage: build_images
   tags:
     - linux
@@ -19,7 +19,7 @@ docker-image-builder:
     - mkdir -p /kaniko/.docker
     - printf '{"auths":{"%s":{"username":"%s","password":"%s"}}}' "$CI_REGISTRY" "$CI_REGISTRY_USER" "$CI_REGISTRY_PASSWORD" > /kaniko/.docker/config.json
   script:
-    # --- content-hash check (similar to apptainer-image-builder-base) ---
+    # --- content-hash check (similar to apptainer-builder-gpu-image-base) ---
     - echo "Files included in content hash:" ${DOCKER_HASH_FILES}
     - CONTEXT_SHA=$(cat ${DOCKER_HASH_FILES} | sha256sum | awk '{print $1}')
     - BUILD_KEY=$(printf '%.16s' "$CONTEXT_SHA")
@@ -89,92 +89,54 @@ docker-image-builder:
     - if: $TEST_ALL_PYTHONS == "1"
     - if: $UPDATE_DOCKER_IMAGE == "1"
 
-.apptainer-image-builder-base:
-  stage: build_images
+# ---------------------------------------------------------------------------
+# Shared storage policy for every Apptainer image this pipeline keeps on the
+# tahiti runner. Both image lanes write SIFs into one directory, so the
+# retention rule and the directories live here once instead of being copied
+# (and drifting) per lane. A lane only picks its IMAGE_PREFIX; the prune keys
+# off that, so the lanes never touch each other's files.
+# ---------------------------------------------------------------------------
+.apptainer-image-store:
   tags:
     - linux_tahiti_gpu
-  needs: []
   variables:
-    # Put all heavy I/O on the large /data mount
+    # Heavy I/O on the large /data mount, NOT on NFS: apptainer unpacks base
+    # images with xattrs, which NFS rejects.
     APPTAINER_TMPDIR: "/data/gitlab-runner/apptainer-tmp"
     APPTAINER_CACHEDIR: "/data/gitlab-runner/apptainer-cache"
     IMG_DIR: "/data/open-darts-apptainer-images"
-    # defaults; override in derived jobs
-    IMAGE_PREFIX: "open-darts"
+    # How many images of one prefix to keep. One number for every lane -- if a
+    # lane ever needs its own, override MAX_IMAGE_NUM there and say why.
     MAX_IMAGE_NUM: "5"
-    GITLAB_CI_TOOLS: "0"
-  before_script:
-    - set -euo pipefail
-    - mkdir -p /data/gitlab-runner/apptainer-tmp /data/gitlab-runner/apptainer-cache /data/open-darts-apptainer-images
-  script:
-    # hash image config
-    - DEF_SHA="$(sha256sum .cicd/build-linux/singularity.def | awk '{print $1}')"
-    # hash other inputs that should trigger rebuild
-    - BLD_FILES_SHA="$(sha256sum .cicd/jobs/build-images.yml .gitlab-ci.yml | awk '{print $1}' | sha256sum | awk '{print $1}')"
-    # commit hash of darts-linear-solvers
-    - DLS_SHA="$(git ls-remote https://oauth2:${DLS_TOKEN}@gitlab.tudelft.nl/dvoskov/darts-linear-solvers.git HEAD | awk '{print $1}')"
-    # combine into BUILD_KEY
-    - BUILD_KEY="$(printf '%s\n%s\n%s\n' "$DEF_SHA" "$BLD_FILES_SHA" "$DLS_SHA" | sha256sum | awk '{print $1}')"
-    - echo "BUILD_KEY=$BUILD_KEY"
-    - IMG="$IMG_DIR/${IMAGE_PREFIX}-${BUILD_KEY}.sif"
-    - printf 'APPTAINER_IMAGE=%s\nAPPTAINER_BUILD_KEY=%s\n' "$IMG" "$BUILD_KEY" > apptainer_image.env
-    # build only if not already present (cache/artifacts from previous runs)
-    - |
-      if [ -f "$IMG" ]; then
-        if apptainer inspect "$IMG" >/dev/null 2>&1; then
-          echo "Reusing cached image $IMG";
-        else
-          echo "Cached image is corrupted, rebuilding: $IMG"
-          rm -f -- "$IMG"
-          apptainer build --fakeroot \
-            --build-arg ENABLE_DLS="${ENABLE_DLS:-1}" \
-            --build-arg DLS_TOKEN="${DLS_TOKEN}" \
-            --build-arg CUDA_ARCH="${CUDA_ARCH:-70}" \
-            --build-arg ENABLE_AGENT_TOOLS="${ENABLE_AGENT_TOOLS:-0}" \
-            "$IMG" .cicd/build-linux/singularity.def;
-        fi
-      else
-        apptainer build --fakeroot \
-          --build-arg ENABLE_DLS="${ENABLE_DLS:-1}" \
-          --build-arg DLS_TOKEN="${DLS_TOKEN}" \
-          --build-arg CUDA_ARCH="${CUDA_ARCH:-70}" \
-          --build-arg ENABLE_AGENT_TOOLS="${ENABLE_AGENT_TOOLS:-0}" \
-          "$IMG" .cicd/build-linux/singularity.def;
-      fi
-    - |
-      if [ "${CI_COMMIT_BRANCH:-}" = "development" ]; then
-        ln -sf "$(basename "$IMG")" "$IMG_DIR/${IMAGE_PREFIX}-latest.sif"
-      else
-        echo "Skipping latest symlink (branch: ${CI_COMMIT_BRANCH:-})"
-      fi
   after_script:
+    # Retention, shared by every lane. Deletes oldest-first down to
+    # MAX_IMAGE_NUM, skips the '<prefix>-latest.sif' symlink and refuses to
+    # delete whatever it points at (a lane without such a symlink is
+    # unaffected). after_script never fails the job, so a full disk shows up as
+    # a build failure rather than a silently skipped clean-up.
     - |
       set -euo pipefail
-      PREFIX="${IMAGE_PREFIX:-open-darts}"
-      echo "Checking for old ${PREFIX} images in ${IMG_DIR}..."
+      PREFIX="${IMAGE_PREFIX:?IMAGE_PREFIX must be set by the lane}"
+      echo "Retention for ${PREFIX}-*.sif in ${IMG_DIR} (keep ${MAX_IMAGE_NUM})"
       LATEST_LINK="$IMG_DIR/${PREFIX}-latest.sif"
       LATEST_TARGET=""
       if [ -L "$LATEST_LINK" ]; then
         LATEST_TARGET="$(readlink -f "$LATEST_LINK" || true)"
-        if [ -n "$LATEST_TARGET" ]; then
-          echo "Will keep latest symlink target: $LATEST_TARGET"
-        fi
+        [ -n "$LATEST_TARGET" ] && echo "Will keep latest symlink target: $LATEST_TARGET"
       fi
-      # Build a list of matching regular files (excluding the 'latest' symlink), oldest first
       TMP_LIST="$(mktemp)"
-      find "$IMG_DIR" -maxdepth 1 -type f -name "${PREFIX}-*.sif" ! -name "${PREFIX}-latest.sif" -printf '%T@ %p\n' | sort -n | awk '{ $1=""; sub(/^ /,""); print }' > "$TMP_LIST"
+      find "$IMG_DIR" -maxdepth 1 -type f -name "${PREFIX}-*.sif" ! -name "${PREFIX}-latest.sif" \
+           -printf '%T@ %p\n' | sort -n | awk '{ $1=""; sub(/^ /,""); print }' > "$TMP_LIST"
       TOTAL="$(wc -l < "$TMP_LIST" | tr -d ' ')"
       MAX="${MAX_IMAGE_NUM:-5}"
       if [ "${TOTAL:-0}" -le "$MAX" ]; then
-        echo "No pruning needed: $TOTAL image(s) present (<= $MAX)."
+        echo "No pruning needed: ${TOTAL:-0} image(s) present (<= $MAX)."
       else
         TO_DELETE="$(( TOTAL - MAX ))"
         echo "Pruning $TO_DELETE oldest image(s) with prefix ${PREFIX}"
         DELETED=0
         while IFS= read -r IMG_PATH; do
-          if [ "$DELETED" -ge "$TO_DELETE" ]; then
-            break
-          fi
+          [ "$DELETED" -ge "$TO_DELETE" ] && break
           if [ -n "$LATEST_TARGET" ] && [ "$IMG_PATH" = "$LATEST_TARGET" ]; then
             echo "Keeping latest target $IMG_PATH"
             continue
@@ -185,6 +147,68 @@ docker-image-builder:
         done < "$TMP_LIST"
       fi
       rm -f "$TMP_LIST" || true
+
+.apptainer-builder-gpu-image-base:
+  extends: .apptainer-image-store      # storage dirs + retention
+  stage: build_images
+  needs: []
+  variables:
+    IMAGE_PREFIX: "open-darts"
+    GITLAB_CI_TOOLS: "0"
+    # Passed to builder-gpu-image.def as a build arg, so it has to take part in the
+    # content hash below -- otherwise changing it would silently reuse the
+    # image built against the previous toolkit.
+    BUILDER_CUDA_VERSION: "12.8.1"
+  before_script:
+    - set -euo pipefail
+    - mkdir -p "$APPTAINER_TMPDIR" "$APPTAINER_CACHEDIR" "$IMG_DIR"
+  script:
+    # hash image config
+    - DEF_SHA="$(sha256sum .cicd/build-linux/builder-gpu-image.def | awk '{print $1}')"
+    # hash other inputs that should trigger rebuild. NB this covers the whole
+    # of build-images.yml, so editing apptainer-runtime-gpu-image further down also
+    # invalidates the *builder* image and costs one rebuild -- deliberate
+    # (over-invalidating is the safe direction) but worth knowing.
+    - BLD_FILES_SHA="$(sha256sum .cicd/jobs/build-images.yml .gitlab-ci.yml | awk '{print $1}' | sha256sum | awk '{print $1}')"
+    # hash the build args too -- they change the image as surely as the def does
+    - ARGS_SHA="$(printf '%s\n%s\n%s\n' "${BUILDER_CUDA_VERSION}" "${ENABLE_AGENT_TOOLS:-0}" "${PY_VER:-}" | sha256sum | awk '{print $1}')"
+    # combine into BUILD_KEY
+    - BUILD_KEY="$(printf '%s\n%s\n%s\n' "$DEF_SHA" "$BLD_FILES_SHA" "$ARGS_SHA" | sha256sum | awk '{print $1}')"
+    - echo "BUILD_KEY=$BUILD_KEY"
+    - IMG="$IMG_DIR/${IMAGE_PREFIX}-${BUILD_KEY}.sif"
+    - printf 'APPTAINER_IMAGE=%s\nAPPTAINER_BUILD_KEY=%s\n' "$IMG" "$BUILD_KEY" > apptainer_image.env
+    # build only if not already present (cache/artifacts from previous runs)
+    - |
+      # The def file's %test section compiles and links a small CUDA program;
+      # apptainer runs it as part of the build, so a broken image never reaches
+      # the downstream compile jobs.
+      build_image() {
+        apptainer build --fakeroot \
+          --build-arg CUDA_VERSION="${BUILDER_CUDA_VERSION}" \
+          --build-arg ENABLE_AGENT_TOOLS="${ENABLE_AGENT_TOOLS:-0}" \
+          "$IMG" .cicd/build-linux/builder-gpu-image.def
+      }
+      if [ "${UPDATE_APPTAINER_IMAGE:-0}" = "1" ]; then
+        echo "UPDATE_APPTAINER_IMAGE=1 -- forcing rebuild of $IMG"
+        rm -f -- "$IMG"
+        build_image
+      elif [ -f "$IMG" ]; then
+        if apptainer inspect "$IMG" >/dev/null 2>&1; then
+          echo "Reusing cached image $IMG";
+        else
+          echo "Cached image is corrupted, rebuilding: $IMG"
+          rm -f -- "$IMG"
+          build_image
+        fi
+      else
+        build_image
+      fi
+    - |
+      if [ "${CI_COMMIT_BRANCH:-}" = "development" ]; then
+        ln -sf "$(basename "$IMG")" "$IMG_DIR/${IMAGE_PREFIX}-latest.sif"
+      else
+        echo "Skipping latest symlink (branch: ${CI_COMMIT_BRANCH:-})"
+      fi
   cache:
     key: "$BUILD_KEY"
     paths:
@@ -195,8 +219,8 @@ docker-image-builder:
     paths:
       - apptainer_image.env
 
-apptainer-image-builder:
-  extends: .apptainer-image-builder-base
+apptainer-builder-gpu-image:
+  extends: .apptainer-builder-gpu-image-base
   variables:
     IMAGE_PREFIX: "open-darts"
     ENABLE_AGENT_TOOLS: "0"
@@ -210,8 +234,8 @@ apptainer-image-builder:
       - if: $TEST_ALL_PYTHONS == "1"
 
 
-# apptainer-image-builder-agents:
-#   extends: .apptainer-image-builder-base
+# apptainer-builder-gpu-image-agents:
+#   extends: .apptainer-builder-gpu-image-base
 #   variables:
 #     IMAGE_PREFIX: "open-darts-agents"
 #     ENABLE_AGENT_TOOLS: "1"
@@ -223,3 +247,188 @@ apptainer-image-builder:
 #     - if: $CI_PIPELINE_SOURCE == "api"
 #       when: manual
 #     - when: never
+
+# ---------------------------------------------------------------------------
+# Portable open-DARTS GPU *runtime* image.
+#
+# Distinct from apptainer-builder-gpu-image above, which produces the *builder*
+# image that compiles open-DARTS. This one produces the artifact end users
+# pull: a slim SIF with open-DARTS already installed. test-apptainer-runtime-gpu
+# (.cicd/jobs/test-linux-gpu.yml) runs the suite inside it, and
+# deploy-apptainer-runtime-gpu-image (.cicd/jobs/deploy.yml) publishes it.
+#
+# Two modes:
+#
+#   validation (default: MRs, and protected branches other than development)
+#       Assemble the image around the wheel build-linux-tahiti-image-gpu just
+#       produced. That wheel is compiled for the runner's own GPU, so the image
+#       is for testing, not for shipping -- but it costs ~8 minutes instead of a
+#       multi-architecture compile, and it means every MR exercises the real
+#       image: the venv, the CUDA closure check, the runscript and the GPU
+#       self-test.
+#
+#   portable (development push/web/schedule pipelines, release tags, or
+#             RUN_RUNTIME_IMAGE=1)
+#       Compile the multi-architecture wheel first, so the image runs on every
+#       GPU generation the project supports. This is the artifact that gets
+#       published -- from every development pipeline and every release tag --
+#       and deploy-apptainer-runtime-gpu-image refuses anything else.
+#
+# See docs/for_developers/ci_cd_gpu_images.md.
+# ---------------------------------------------------------------------------
+
+.apptainer-runtime-gpu-image-base:
+    extends: .apptainer-image-store      # storage dirs + retention
+    variables:
+        # NOT "open-darts-gpu": the builder lane prunes "open-darts-*.sif" in
+        # this same directory and would eat these.
+        IMAGE_PREFIX: "darts-gpu"
+        # The builder lane's prefix, used only to find a builder image to
+        # compile in (see before_script) -- not this lane's own retention key.
+        BUILDER_IMAGE_PREFIX: "open-darts"
+        # Overridable so the image can be matched to a runner's driver. 12.8 is
+        # the only toolkit spanning sm_70 (Volta CI runner) to sm_120 (RTX 5090).
+        RUNTIME_CUDA_VERSION: "12.8.1"
+        RUNTIME_CUDA_ARCH: "70-real;80-real;90-real;100-real;120-real;120-virtual"
+        RUNTIME_CPU_ARCH: "x86-64-v3"
+        # "validation" reuses the upstream wheel; "portable" compiles a
+        # multi-architecture one. Release tags force portable (see below).
+        RUNTIME_IMAGE_MODE: "validation"
+    rules:
+        - if: $MCP_TRIGGER_TAHITI_GPU == "1"
+          when: never
+        # development publishes every pipeline's image (see
+        # deploy-apptainer-runtime-gpu-image), and only a portable image may be
+        # published -- so build it portable. Same condition as the deploy job,
+        # so a pipeline that will not publish is not charged the long build.
+        - if: $CI_COMMIT_BRANCH == "development" && $CI_PIPELINE_SOURCE =~ /^(push|web|schedule)$/
+          variables:
+            RUNTIME_IMAGE_MODE: "portable"
+        - if: $CI_COMMIT_TAG =~ /^v?[0-9]+\.[0-9]+\.[0-9]+/
+          variables:
+            RUNTIME_IMAGE_MODE: "portable"
+        - if: $RUN_RUNTIME_IMAGE == "1"
+          variables:
+            RUNTIME_IMAGE_MODE: "portable"
+        - if: $RUN_RUNTIME_IMAGE_DEPLOY == "1"
+          variables:
+            RUNTIME_IMAGE_MODE: "portable"
+        # The MR lane: the test job runs inside this image, so it has to exist
+        # wherever test-apptainer-runtime-gpu does.
+        - if: $CI_COMMIT_REF_PROTECTED == "true"
+        - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+        - if: $CI_COMMIT_BRANCH == "main"
+        - if: $TEST_CUSTOM_BRANCH == "1"
+        - when: never
+
+apptainer-runtime-gpu-image:
+    # stage: build, not build_images, despite sitting with the image builders.
+    # In validation mode the image is assembled around the wheel from
+    # build-linux-tahiti-image-gpu: the wheel is installed into it, and ldd checks
+    # that the CUDA runtime libraries the image installs cover the wheel's .so
+    # files. `needs:` may only name jobs in the same or an earlier stage, so in
+    # build_images the whole pipeline config is invalid with
+    #   need build-linux-tahiti-image-gpu is not defined in current or prior stages
+    stage: build
+    extends: .apptainer-runtime-gpu-image-base
+    # A four-architecture CUDA compile plus thirdparty is hours, not minutes.
+    timeout: 8h
+    needs:
+        # Both optional: their rules are narrower than this lane's, and a hard
+        # need on a job that was never created makes the whole pipeline config
+        # invalid. Validation mode wants the wheel; portable mode wants the
+        # builder image. Whichever is missing is handled below.
+        - job: build-linux-tahiti-image-gpu
+          artifacts: true
+          optional: true
+        - job: apptainer-builder-gpu-image
+          artifacts: true
+          optional: true
+    before_script:
+        - set -euo pipefail
+        - mkdir -p "$APPTAINER_TMPDIR" "$APPTAINER_CACHEDIR" "$IMG_DIR"
+        - |
+          # Prefer the upstream dotenv, then the shared 'latest' symlink, then
+          # the newest builder image on the runner. If none exists,
+          # build_runtime_image.sh builds one itself (slow but correct), so this
+          # is a fallback chain rather than a failure.
+          if [ -z "${APPTAINER_IMAGE:-}" ] || [ ! -f "${APPTAINER_IMAGE:-}" ]; then
+            CAND="$(readlink -f "$IMG_DIR/${BUILDER_IMAGE_PREFIX}-latest.sif" 2>/dev/null || true)"
+            if [ -z "$CAND" ] || [ ! -f "$CAND" ]; then
+              CAND="$(find "$IMG_DIR" -maxdepth 1 -type f -name "${BUILDER_IMAGE_PREFIX}-*.sif" \
+                        ! -name "${BUILDER_IMAGE_PREFIX}-latest.sif" -printf '%T@ %p\n' \
+                      | sort -nr | head -n1 | cut -d' ' -f2-)"
+            fi
+            APPTAINER_IMAGE="${CAND:-}"
+          fi
+          if [ -n "$APPTAINER_IMAGE" ] && [ -f "$APPTAINER_IMAGE" ]; then
+            echo "Builder image: $APPTAINER_IMAGE"
+            export APPTAINER_IMAGE
+          else
+            echo "No builder image on this runner; build_runtime_image.sh will make one."
+            unset APPTAINER_IMAGE || true
+          fi
+    script:
+        # The image content depends on both the recipe and the source it compiles,
+        # so the cache key is the recipe hash plus the commit. Re-running a
+        # pipeline on the same commit reuses the image; a new commit rebuilds.
+        - |
+          DEF_SHA="$(sha256sum .cicd/build-linux/runtime-gpu-image.def \
+                                .cicd/build-linux/build_runtime_image.sh \
+                                .cicd/jobs/build-images.yml \
+                     | sha256sum | awk '{print $1}')"
+          BUILD_KEY="$(printf '%s-%.12s-%.12s' "${RUNTIME_IMAGE_MODE}" "$CI_COMMIT_SHA" "$DEF_SHA")"
+          IMG="$IMG_DIR/${IMAGE_PREFIX}-${BUILD_KEY}.sif"
+          echo "BUILD_KEY=$BUILD_KEY"
+          printf 'RUNTIME_IMAGE=%s\nRUNTIME_BUILD_KEY=%s\n' "$IMG" "$BUILD_KEY" > runtime_image.env
+          if [ -f "$IMG" ] && [ "${UPDATE_RUNTIME_IMAGE:-0}" != "1" ] && apptainer inspect "$IMG" >/dev/null 2>&1; then
+            echo "Reusing cached runtime image $IMG"
+            exit 0
+          fi
+          rm -f -- "$IMG"
+          # The venv in the image must match the Python the wheel was compiled
+          # with, which for every CI lane is DEFAULT_PY_VER. If it is somehow
+          # unset, say nothing and let build_runtime_image.sh read the wheel's
+          # own ABI tag rather than pass an empty --py-ver.
+          PY_ARG=""
+          if [ -n "${DEFAULT_PY_VER:-}" ]; then
+            PY_ARG="--py-ver ${DEFAULT_PY_VER}"
+          else
+            echo "DEFAULT_PY_VER is unset; deriving the image's Python from the wheel"
+          fi
+          MODE_ARGS=""
+          if [ "${RUNTIME_IMAGE_MODE}" = "portable" ]; then
+            # Compile the multi-architecture wheel in the builder image.
+            if [ -n "${APPTAINER_IMAGE:-}" ]; then
+              MODE_ARGS="--builder-image $APPTAINER_IMAGE"
+            fi
+            MODE_ARGS="$MODE_ARGS --cuda-arch ${RUNTIME_CUDA_ARCH} --cpu-arch ${RUNTIME_CPU_ARCH} -j 16"
+          else
+            # Reuse the wheel build-linux-tahiti-image-gpu produced. It is a
+            # `native` build for this runner's GPU, so label it honestly --
+            # deploy-apptainer-runtime-gpu-image checks this label and refuses to publish it.
+            WHEEL="$(ls -t ./dist/*.whl 2>/dev/null | head -n1 || true)"
+            if [ -z "$WHEEL" ]; then
+              echo "validation mode needs the wheel artifact from build-linux-tahiti-image-gpu" >&2
+              ls -la ./dist 2>/dev/null || true
+              exit 1
+            fi
+            echo "Validation image from $WHEEL (single-architecture, not for release)"
+            MODE_ARGS="--wheel $WHEEL --cuda-arch ci-validation-native --cpu-arch native"
+          fi
+          # shellcheck disable=SC2086
+          ./.cicd/build-linux/build_runtime_image.sh \
+              $MODE_ARGS \
+              --output "$IMG" \
+              $PY_ARG \
+              --cuda-version "$RUNTIME_CUDA_VERSION"
+          apptainer inspect "$IMG"
+          ls -lh "$IMG"
+    artifacts:
+        reports:
+            dotenv: runtime_image.env
+        paths:
+            - runtime_image.env
+            - '*.log'
+        expire_in: 1 week
+        when: always

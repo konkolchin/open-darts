@@ -1,0 +1,6 @@
+# Exact versions for CI only, applied to every pip install through PIP_CONSTRAINT in .gitlab-ci.yml.
+# Constraints restrict versions but never add packages; user installs follow pyproject.toml.
+# SciPy interpolation changes between releases shift the model reference results (ref/*.pkl).
+scipy<=1.17.1
+# pandas 3 cannot read the reference pickles written with pandas 2.
+pandas==2.3.3

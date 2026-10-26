@@ -1033,6 +1033,13 @@ namespace opendarts
         }
         se_reduce_rhs_kernel<N, K, M><<<grid, SE_BLOCK>>>(n_rows, rows_ptr_d, cols_ind_d,
           values_d, k_rows_d, elim_cols_d, h_eff_d, B, b_red_d);
+        // The inner solver treats this vector as its INITIAL GUESS as well as
+        // its output (linsolv_gmres_gpu forms r = B - A X from it), and x_red is
+        // allocated once: left uncleared, every solve would start from the
+        // previous reduced Newton update. The engine zeroes its own dX before
+        // calling us; this wrapper has to do the same for the reduced vector it
+        // interposes.
+        cudaMemset(x_red_d, 0, sizeof(mat_float) * (size_t)n_rows * M);
         const int rc = inner->solve(b_red_d, x_red_d);
         // Unified convention: a POSITIVE rc means the inner iterate is usable
         // (not converged). The back-substitution must still run -- returning
@@ -1090,6 +1097,9 @@ namespace opendarts
       }
 #endif
       if (reduce_rhs_host(B)) return -1;
+      // See the device path above: the inner solver reads this as its initial
+      // guess, so it must start at zero rather than at the previous update.
+      std::fill(x_red.begin(), x_red.end(), 0.0);
       const int rc = inner->solve(b_red.data(), x_red.data());
       if (rc < 0) return rc; // hard failure only; a usable (positive) iterate
                              // still needs the back-substitution below
