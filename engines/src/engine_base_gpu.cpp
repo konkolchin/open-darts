@@ -1,3 +1,5 @@
+#include "od_gpu_runtime.hpp"
+
 #include <cmath>
 #include <cstring>
 #include <vector>

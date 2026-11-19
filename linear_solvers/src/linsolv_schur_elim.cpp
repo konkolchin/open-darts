@@ -22,7 +22,7 @@
 #include <vector>
 
 #ifdef WITH_GPU
-#include <cuda_runtime.h>
+#include "od_gpu_runtime.hpp"
 #endif
 
 #include "linsolv_schur_elim.hpp"
@@ -36,7 +36,7 @@ namespace opendarts
       using opendarts::config::index_t;
       using opendarts::config::mat_float;
 
-#if defined(__CUDACC__)
+#if defined(__CUDACC__) || defined(__HIPCC__)
 #define OD_SE_HD __host__ __device__
 #else
 #define OD_SE_HD

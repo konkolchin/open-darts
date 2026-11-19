@@ -22,7 +22,7 @@
 #include <cstring>
 #include <vector>
 
-#include <cuda_runtime.h>
+#include "od_gpu_runtime.hpp"
 
 #include "linsolv_cpr_gpu.hpp"
 #include "csr_matrix.hpp"

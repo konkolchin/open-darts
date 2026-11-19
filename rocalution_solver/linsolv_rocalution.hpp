@@ -9,7 +9,7 @@
 class linsolv_rocalution
 {
 public:
-  explicit linsolv_rocalution(int device_num = 0);
+  explicit linsolv_rocalution(int device_num = 0, int verbose = 1);
   ~linsolv_rocalution();
 
   linsolv_rocalution(const linsolv_rocalution&) = delete;
@@ -35,5 +35,9 @@ private:
   struct Impl;
   Impl* impl;
 };
+
+// Reference-counted rocALUTION backend, shared by every solver in this folder.
+void rocalution_platform_acquire(int device_num);
+void rocalution_platform_release();
 
 #endif

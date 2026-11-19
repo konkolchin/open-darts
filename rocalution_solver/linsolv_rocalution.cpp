@@ -14,6 +14,7 @@ struct linsolv_rocalution::Impl
   double tolerance = 1e-10;
   int n_iters = 0;
   double residual = 0.0;
+  int verbose = 1;
   bool built = false;
 
   std::vector<int> row_ptr;
@@ -51,14 +52,28 @@ void stop_platform()
 }
 } // namespace
 
-linsolv_rocalution::linsolv_rocalution(int device_num)
+void rocalution_platform_acquire(int device_num)
+{
+  start_platform(device_num);
+  ++g_alive;
+}
+
+void rocalution_platform_release()
+{
+  if (g_alive > 0)
+    --g_alive;
+  if (g_alive == 0)
+    stop_platform();
+}
+
+linsolv_rocalution::linsolv_rocalution(int device_num, int verbose)
   : impl(nullptr)
 {
   // rocALUTION objects assert that the backend is already initialized.
-  start_platform(device_num);
+  rocalution_platform_acquire(device_num);
   impl = new Impl;
   impl->device_num = device_num;
-  ++g_alive;
+  impl->verbose = verbose;
 }
 
 linsolv_rocalution::~linsolv_rocalution()
@@ -72,9 +87,7 @@ linsolv_rocalution::~linsolv_rocalution()
     impl->x.Clear();
   }
   delete impl;
-  --g_alive;
-  if (g_alive == 0)
-    stop_platform();
+  rocalution_platform_release();
 }
 
 int linsolv_rocalution::init(int n_rows,
@@ -133,7 +146,7 @@ int linsolv_rocalution::setup()
   // Absolute, relative, divergence, maximum iterations.
   impl->gmres.Init(impl->tolerance, impl->tolerance, 1.0e8, impl->max_iters);
   impl->gmres.SetBasisSize(impl->n_rows < 30 ? impl->n_rows : 30);
-  impl->gmres.Verbose(1);
+  impl->gmres.Verbose(impl->verbose);
   impl->gmres.Build();
 
   impl->A.MoveToAccelerator();
@@ -142,8 +155,9 @@ int linsolv_rocalution::setup()
   impl->gmres.MoveToAccelerator();
   impl->built = true;
 
-  std::cout << "rocALUTION: GMRES + Jacobi on device " << impl->device_num
-            << ", n=" << impl->n_rows << ", nnz=" << impl->nnz << std::endl;
+  if (impl->verbose)
+    std::cout << "rocALUTION: GMRES + Jacobi on device " << impl->device_num
+              << ", n=" << impl->n_rows << ", nnz=" << impl->nnz << std::endl;
   return 0;
 }
 
@@ -160,8 +174,9 @@ int linsolv_rocalution::solve(const double* b, double* x)
   impl->n_iters = impl->gmres.GetIterationCount();
   impl->residual = impl->gmres.GetCurrentResidual();
   const int status = impl->gmres.GetSolverStatus();
-  std::cout << "rocALUTION: status " << status << ", iterations " << impl->n_iters
-            << ", residual " << impl->residual << std::endl;
+  if (impl->verbose)
+    std::cout << "rocALUTION: status " << status << ", iterations " << impl->n_iters
+              << ", residual " << impl->residual << std::endl;
 
   // 1 = absolute tolerance, 2 = relative tolerance.
   if (status == 1 || status == 2)

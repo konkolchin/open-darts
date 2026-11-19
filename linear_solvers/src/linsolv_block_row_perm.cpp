@@ -21,7 +21,7 @@
 #include <vector>
 
 #ifdef WITH_GPU
-#include <cuda_runtime.h>
+#include "od_gpu_runtime.hpp"
 #endif
 
 #include "linsolv_block_row_perm.hpp"
@@ -35,7 +35,7 @@ namespace opendarts
       using opendarts::config::index_t;
       using opendarts::config::mat_float;
 
-#if defined(WITH_GPU) && defined(__CUDACC__)
+#if defined(WITH_GPU) && (defined(__CUDACC__) || defined(__HIPCC__))
       constexpr int BRP_BLOCK = 256;
 
       // dst block e, local row r  <-  src block e, local row perm[r]; block rows
@@ -216,7 +216,7 @@ namespace opendarts
 #ifdef WITH_GPU
       if (on_device)
       {
-#if defined(__CUDACC__)
+#if defined(__CUDACC__) || defined(__HIPCC__)
         const int grid = (int)((n_rows + BRP_BLOCK - 1) / BRP_BLOCK);
         if (t)
           t->start();
@@ -231,7 +231,7 @@ namespace opendarts
           return 1;
         }
 #else
-        printf("linsolv_block_row_perm: device path needs a CUDA-compiled translation unit\n");
+        printf("linsolv_block_row_perm: device path needs a CUDA or HIP translation unit\n");
         return 1;
 #endif
         return inner->setup(permuted);
@@ -263,7 +263,7 @@ namespace opendarts
 #ifdef WITH_GPU
       if (on_device)
       {
-#if defined(__CUDACC__)
+#if defined(__CUDACC__) || defined(__HIPCC__)
         const int grid = (int)((n_rows + BRP_BLOCK - 1) / BRP_BLOCK);
         if (t)
           t->start();

@@ -375,17 +375,52 @@ source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR}/.. FILES ${OD_LINEAR_SOLVERS_PUBLI
 # inherit _GLIBCXX_USE_CXX11_ABI=0. Its public methods pass only pointers
 # and scalars.
 if(WITH_ROCALUTION)
-  set(_od_rocalution_src "${CMAKE_SOURCE_DIR}/rocalution_solver/linsolv_rocalution.cpp")
-  set_source_files_properties(${_od_rocalution_src}
+  set(_od_rocalution_hip
+    ${CMAKE_SOURCE_DIR}/rocalution_solver/linsolv_rocalution.cpp
+    ${CMAKE_SOURCE_DIR}/rocalution_solver/linsolv_rocalution_backend.cpp)
+  set(_od_rocalution_cxx
+    ${CMAKE_SOURCE_DIR}/rocalution_solver/linsolv_rocalution_darts.cpp
+    ${CMAKE_SOURCE_DIR}/rocalution_solver/linsolv_rocalution_cpr.cpp)
+  set_source_files_properties(${_od_rocalution_hip}
     PROPERTIES
       LANGUAGE HIP
       COMPILE_OPTIONS "-U_GLIBCXX_USE_CXX11_ABI;-D_GLIBCXX_USE_CXX11_ABI=1")
-  target_sources(linear_solvers PRIVATE ${_od_rocalution_src})
+  target_sources(linear_solvers PRIVATE ${_od_rocalution_hip} ${_od_rocalution_cxx})
   target_link_libraries(linear_solvers PUBLIC rocalution::rocalution)
   target_include_directories(linear_solvers
     PRIVATE
       ${CMAKE_SOURCE_DIR}/rocalution_solver)
-  unset(_od_rocalution_src)
+  unset(_od_rocalution_hip)
+  unset(_od_rocalution_cxx)
+
+  # Device kernels that are still CUDA on an NVIDIA build, compiled as HIP
+  # here. gfx1100 is the first target (the compiler's CMAKE_HIP_ARCHITECTURES).
+  # These objects are not linked into the CPU solver. The host assembly path
+  # used by the Newton loop stays the one above.
+  if(NOT CUDA)
+    set(_od_hip_device_src
+      ${CMAKE_SOURCE_DIR}/rocalution_solver/hip_device/compile_schur.cpp
+      ${CMAKE_SOURCE_DIR}/rocalution_solver/hip_device/compile_block_row_perm.cpp
+      ${CMAKE_SOURCE_DIR}/rocalution_solver/hip_device/compile_cpr_gpu.cpp
+      ${CMAKE_SOURCE_DIR}/rocalution_solver/hip_device/compile_engine_assembly.cpp)
+    add_library(opendarts_hip_device OBJECT ${_od_hip_device_src})
+    set_source_files_properties(${_od_hip_device_src} PROPERTIES LANGUAGE HIP)
+    target_compile_definitions(opendarts_hip_device PRIVATE WITH_GPU OPENDARTS_LINEAR_SOLVERS)
+    target_include_directories(opendarts_hip_device BEFORE PRIVATE
+      ${CMAKE_SOURCE_DIR}/rocalution_solver/hip_compat)
+    target_include_directories(opendarts_hip_device PRIVATE
+      ${CMAKE_SOURCE_DIR}/linear_solvers/include
+      ${CMAKE_SOURCE_DIR}/linear_solvers/src
+      ${CMAKE_BINARY_DIR}/linear_solvers/src/generated
+      ${CMAKE_SOURCE_DIR}/engines/src
+      ${CMAKE_SOURCE_DIR}/interpolation/include
+      ${ROCM_PATH}/include)
+    target_link_libraries(opendarts_hip_device PRIVATE
+      opendarts_compiler_flags
+      pybind11::pybind11
+      HYPRE::HYPRE)
+    unset(_od_hip_device_src)
+  endif()
 endif()
 
 message(STATUS "Unified linear_solvers library configured (includes MGR)")

@@ -35,6 +35,10 @@
 #include "solver_config.hpp"
 #include "solver_configs.hpp"
 #include "solver_registry.hpp"
+#ifdef WITH_ROCALUTION
+#include "linsolv_rocalution_cpr.hpp"
+#include "linsolv_rocalution_darts.hpp"
+#endif
 
 namespace opendarts
 {
@@ -603,6 +607,26 @@ namespace opendarts
         return build_fs_cpr_for_block_size(block_size, *fs_config,
             P_VAR, Z_VAR, U_VAR, NC);
       }
+
+#ifdef WITH_ROCALUTION
+      solver_handle make_rocalution_solver(
+          const opendarts::linear_solvers::solver_config &config, int block_size)
+      {
+        (void)block_size;
+        auto solver = std::make_shared<linsolv_rocalution_solver>();
+        solver->reconfigure(config);
+        return solver;
+      }
+
+      solver_handle make_rocalution_cpr_solver(
+          const opendarts::linear_solvers::solver_config &config, int block_size)
+      {
+        (void)block_size;
+        auto solver = std::make_shared<linsolv_rocalution_cpr>();
+        solver->reconfigure(config);
+        return solver;
+      }
+#endif
     } // anonymous namespace
 
     void register_builtin_solvers()
@@ -620,6 +644,10 @@ namespace opendarts
       register_solver("cpr", make_cpr_solver);
       register_solver("schur_elim", make_schur_elim_solver);
       register_solver("fs_cpr", make_fs_cpr_solver);
+#ifdef WITH_ROCALUTION
+      register_solver("rocalution", make_rocalution_solver);
+      register_solver("rocalution_cpr", make_rocalution_cpr_solver);
+#endif
     }
   } // namespace linear_solvers
 } // namespace opendarts
