@@ -5,6 +5,8 @@
 #include "scalar_csr_adapter.hpp"
 #include "solver_config.hpp"
 
+#include <algorithm>
+#include <cmath>
 #include <memory>
 #include <vector>
 
@@ -21,6 +23,9 @@ namespace opendarts
       std::vector<int> p_row;
       std::vector<int> p_col;
       std::vector<double> p_val;
+      std::vector<double> p_scale;
+      std::vector<double> full_scale;
+      std::vector<double> scaled_full;
       std::vector<double> p_rhs;
       std::vector<double> p_x;
       std::vector<double> full_x;
@@ -64,6 +69,24 @@ namespace opendarts
           col[static_cast<std::size_t>(k)] = cols[k];
           val[static_cast<std::size_t>(k)] =
               values[static_cast<std::size_t>(k) * nb * nb + slot];
+        }
+      }
+
+      void scale_rows(int n, const int *row, std::vector<double> &val, std::vector<double> &scale)
+      {
+        scale.assign(static_cast<std::size_t>(n), 1.0);
+        for (int i = 0; i < n; ++i)
+        {
+          double max_abs = 0.0;
+          for (int k = row[i]; k < row[i + 1]; ++k)
+            max_abs = std::max(max_abs, std::abs(val[static_cast<std::size_t>(k)]));
+          if (max_abs > 0.0)
+          {
+            const double s = 1.0 / max_abs;
+            scale[static_cast<std::size_t>(i)] = s;
+            for (int k = row[i]; k < row[i + 1]; ++k)
+              val[static_cast<std::size_t>(k)] *= s;
+          }
         }
       }
 
@@ -139,11 +162,14 @@ namespace opendarts
       gather_pressure(*impl->A, impl->pressure_var, impl->p_row, impl->p_col, impl->p_val);
       const int n_blocks = static_cast<int>(impl->A->n_block_rows());
       const int n_scalar = impl->scalar->n_rows();
+      scale_rows(n_blocks, impl->p_row.data(), impl->p_val, impl->p_scale);
+      impl->scaled_full.assign(impl->scalar->values(), impl->scalar->values() + impl->scalar->nnz());
+      scale_rows(n_scalar, impl->scalar->row_ptr(), impl->scaled_full, impl->full_scale);
       if (rocalution_pair_setup(impl->pressure, n_blocks, impl->p_row.data(),
               impl->p_col.data(), impl->p_val.data(), impl->max_iters, impl->tolerance) != 0)
         return -1;
       if (rocalution_pair_setup(impl->full, n_scalar, impl->scalar->row_ptr(),
-              impl->scalar->col_ind(), impl->scalar->values(), impl->max_iters,
+              impl->scalar->col_ind(), impl->scaled_full.data(), impl->max_iters,
               impl->tolerance) != 0)
         return -1;
       impl->ready = true;
@@ -164,7 +190,8 @@ namespace opendarts
       impl->full_x.assign(static_cast<std::size_t>(n), 0.0);
       impl->ax.resize(static_cast<std::size_t>(n));
       for (int i = 0; i < n_blocks; ++i)
-        impl->p_rhs[static_cast<std::size_t>(i)] = B[i * nb + p];
+        impl->p_rhs[static_cast<std::size_t>(i)] =
+            B[i * nb + p] * impl->p_scale[static_cast<std::size_t>(i)];
       if (rocalution_pair_solve(impl->pressure, impl->p_rhs.data(), impl->p_x.data()) != 0)
         return -1;
       for (int i = 0; i < n_blocks; ++i)
@@ -174,7 +201,8 @@ namespace opendarts
           impl->full_x.data(), impl->ax.data());
       std::vector<double> residual(static_cast<std::size_t>(n));
       for (int i = 0; i < n; ++i)
-        residual[static_cast<std::size_t>(i)] = B[i] - impl->ax[static_cast<std::size_t>(i)];
+        residual[static_cast<std::size_t>(i)] =
+            (B[i] - impl->ax[static_cast<std::size_t>(i)]) * impl->full_scale[static_cast<std::size_t>(i)];
       std::vector<double> dx(static_cast<std::size_t>(n));
       if (rocalution_pair_solve(impl->full, residual.data(), dx.data()) != 0)
         return -1;

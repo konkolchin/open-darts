@@ -7,6 +7,7 @@
 // and solves it with the existing rocALUTION GMRES + Jacobi adapter.
 
 #include <memory>
+#include <vector>
 
 #include "linear_solver.hpp"
 #include "linsolv_rocalution.hpp"
@@ -43,6 +44,10 @@ namespace opendarts
       int max_iters_ = 50;
       double tolerance_ = 1e-6;
       bool ready_ = false;
+      // Row equilibration for Jacobi. Well rows are many orders larger than
+      // reservoir rows; without it the preconditioned residual ignores them.
+      std::vector<double> row_scale_;
+      std::vector<double> scaled_b_;
     };
   } // namespace linear_solvers
 } // namespace opendarts
