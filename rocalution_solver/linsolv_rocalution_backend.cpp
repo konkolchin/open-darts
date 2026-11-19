@@ -75,7 +75,8 @@ struct pair_impl : rocalution_pair
     const int budget = max_iters > 0 ? max_iters : 50;
     const double tolerance = tol > 0.0 ? tol : 1e-8;
     solver.Init(tolerance, tolerance, 1.0e8, budget);
-    solver.SetBasisSize(n < 30 ? n : 30);
+    const int basis = n < 400 ? n : 400;
+    solver.SetBasisSize(basis);
     solver.Verbose(0);
     solver.Build();
     if (on_accelerator)

@@ -146,7 +146,8 @@ int linsolv_rocalution::setup()
   impl->gmres.SetOperator(impl->A);
   // Absolute, relative, divergence, maximum iterations.
   impl->gmres.Init(impl->tolerance, impl->tolerance, 1.0e8, impl->max_iters);
-  impl->gmres.SetBasisSize(impl->n_rows < 30 ? impl->n_rows : 30);
+  const int basis = impl->n_rows < 400 ? impl->n_rows : 400;
+  impl->gmres.SetBasisSize(basis);
   impl->gmres.Verbose(impl->verbose);
   impl->gmres.Build();
 
