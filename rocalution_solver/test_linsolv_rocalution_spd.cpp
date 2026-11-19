@@ -82,9 +82,10 @@ int run_pair(const char* name,
     const std::vector<int>& col_ind,
     const std::vector<double>& values,
     const std::vector<double>& b,
-    double error_tol)
+    double error_tol,
+    bool on_accelerator)
 {
-  std::cout << "---- " << name << std::endl;
+  std::cout << "---- " << name << (on_accelerator ? "" : " (host)") << std::endl;
 
   Matrix A;
   A.CopyFromHostCSR(row_ptr.data(), col_ind.data(), values.data(), name,
@@ -103,10 +104,16 @@ int run_pair(const char* name,
   solver.Verbose(0);
   solver.Build();
 
-  A.MoveToAccelerator();
-  rhs.MoveToAccelerator();
-  sol.MoveToAccelerator();
-  solver.MoveToAccelerator();
+  // IC's triangular solve in this rocALUTION build asserts unless the factor,
+  // the inverse diagonal, and both vectors are on one backend. Moving that
+  // pair to the GPU leaves them split, so IC stays on the host.
+  if (on_accelerator)
+  {
+    A.MoveToAccelerator();
+    rhs.MoveToAccelerator();
+    sol.MoveToAccelerator();
+    solver.MoveToAccelerator();
+  }
 
   rhs.CopyFromHostData(b.data());
   sol.Zeros();
@@ -148,15 +155,15 @@ int main()
 
   int failed = 0;
   failed += run_pair<rocalution::CG<Matrix, Vector, double>, rocalution::Jacobi<Matrix, Vector, double>>(
-      "CG + Jacobi", n, row_ptr, col_ind, values, b, error_tol);
+      "CG + Jacobi", n, row_ptr, col_ind, values, b, error_tol, true);
   failed += run_pair<rocalution::CG<Matrix, Vector, double>, rocalution::IC<Matrix, Vector, double>>(
-      "CG + IC(0)", n, row_ptr, col_ind, values, b, error_tol);
+      "CG + IC(0)", n, row_ptr, col_ind, values, b, error_tol, false);
   failed += run_pair<rocalution::CG<Matrix, Vector, double>, rocalution::SAAMG<Matrix, Vector, double>>(
-      "CG + SAAMG", n, row_ptr, col_ind, values, b, error_tol);
+      "CG + SAAMG", n, row_ptr, col_ind, values, b, error_tol, true);
   failed += run_pair<rocalution::CG<Matrix, Vector, double>, rocalution::UAAMG<Matrix, Vector, double>>(
-      "CG + UAAMG", n, row_ptr, col_ind, values, b, error_tol);
+      "CG + UAAMG", n, row_ptr, col_ind, values, b, error_tol, true);
   failed += run_pair<rocalution::CG<Matrix, Vector, double>, rocalution::RugeStuebenAMG<Matrix, Vector, double>>(
-      "CG + RugeStuebenAMG", n, row_ptr, col_ind, values, b, error_tol);
+      "CG + RugeStuebenAMG", n, row_ptr, col_ind, values, b, error_tol, true);
 
   rocalution::stop_rocalution();
   std::cout << (failed == 0 ? "SUITE OK" : "SUITE FAIL") << " failed=" << failed << std::endl;
