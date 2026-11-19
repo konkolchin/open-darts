@@ -121,9 +121,11 @@ namespace opendarts
       if (b2 == 0.0)
         return 0;
       const double rel = std::sqrt(r2 / b2);
-      // rocALUTION reports the preconditioned residual. Accept the step only
-      // when the original system was actually reduced.
-      if (rel <= std::max(tolerance_ * 50.0, 1e-8))
+      // Jacobi-GMRES drives the preconditioned residual well below the true
+      // one and then stalls. A true relative residual of 1e-2 is still a
+      // usable Newton step. A reported success with almost no reduction is a
+      // zero update and has to be rejected, or the well residual never moves.
+      if (rel <= std::max(tolerance_, 1.0e-2))
         return 0;
       return solved == 0 ? -1 : solved;
     }

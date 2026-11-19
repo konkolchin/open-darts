@@ -204,14 +204,29 @@ namespace opendarts
         residual[static_cast<std::size_t>(i)] =
             (B[i] - impl->ax[static_cast<std::size_t>(i)]) * impl->full_scale[static_cast<std::size_t>(i)];
       std::vector<double> dx(static_cast<std::size_t>(n));
-      if (rocalution_pair_solve(impl->full, residual.data(), dx.data()) != 0)
-        return -1;
+      const int full_rc = rocalution_pair_solve(impl->full, residual.data(), dx.data());
       for (int i = 0; i < n; ++i)
         X[i] = impl->full_x[static_cast<std::size_t>(i)] + dx[static_cast<std::size_t>(i)];
 
       impl->iters = rocalution_pair_iters(impl->pressure) + rocalution_pair_iters(impl->full);
       impl->residual = rocalution_pair_residual(impl->full);
-      return 0;
+
+      matvec(n, impl->scalar->row_ptr(), impl->scalar->col_ind(), impl->scalar->values(),
+          X, impl->ax.data());
+      double b2 = 0.0;
+      double r2 = 0.0;
+      for (int i = 0; i < n; ++i)
+      {
+        const double r = B[i] - impl->ax[static_cast<std::size_t>(i)];
+        r2 += r * r;
+        b2 += B[i] * B[i];
+      }
+      if (b2 == 0.0)
+        return 0;
+      const double rel = std::sqrt(r2 / b2);
+      if (rel <= std::max(impl->tolerance, 1.0e-2))
+        return 0;
+      return full_rc == 0 ? -1 : full_rc;
     }
 
     int linsolv_rocalution_cpr::get_n_iters()
