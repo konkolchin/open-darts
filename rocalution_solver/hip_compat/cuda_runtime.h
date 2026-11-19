@@ -11,26 +11,30 @@ using cudaError_t = hipError_t;
 using cudaStream_t = hipStream_t;
 using cudaEvent_t = hipEvent_t;
 
-constexpr auto cudaSuccess = hipSuccess;
-constexpr auto cudaMemcpyHostToDevice = hipMemcpyHostToDevice;
-constexpr auto cudaMemcpyDeviceToHost = hipMemcpyDeviceToHost;
+#define cudaSuccess hipSuccess
+#define cudaErrorHostMemoryAlreadyRegistered hipErrorHostMemoryAlreadyRegistered
+#define cudaErrorMemoryAllocation hipErrorMemoryAllocation
+#define cudaErrorNotSupported hipErrorNotSupported
 
-inline cudaError_t cudaMalloc(void **ptr, size_t bytes) { return hipMalloc(ptr, bytes); }
-inline cudaError_t cudaFree(void *ptr) { return hipFree(ptr); }
-inline cudaError_t cudaMemcpy(void *dst, const void *src, size_t bytes, hipMemcpyKind kind)
-{
-  return hipMemcpy(dst, src, bytes, kind);
-}
-inline cudaError_t cudaMemset(void *ptr, int value, size_t bytes) { return hipMemset(ptr, value, bytes); }
-inline cudaError_t cudaDeviceSynchronize() { return hipDeviceSynchronize(); }
-inline cudaError_t cudaGetLastError() { return hipGetLastError(); }
-inline const char *cudaGetErrorString(cudaError_t err) { return hipGetErrorString(err); }
-inline cudaError_t cudaHostUnregister(void *ptr) { return hipHostUnregister(ptr); }
-inline cudaError_t cudaMemGetInfo(size_t *free_bytes, size_t *total_bytes)
-{
-  return hipMemGetInfo(free_bytes, total_bytes);
-}
+#define cudaMemcpyHostToDevice hipMemcpyHostToDevice
+#define cudaMemcpyDeviceToHost hipMemcpyDeviceToHost
+#define cudaMemcpyDeviceToDevice hipMemcpyDeviceToDevice
+#define cudaHostRegisterDefault hipHostRegisterDefault
 
+#define cudaMalloc hipMalloc
+#define cudaFree hipFree
+#define cudaMemcpy hipMemcpy
+#define cudaMemset hipMemset
+#define cudaDeviceSynchronize hipDeviceSynchronize
+#define cudaGetLastError hipGetLastError
+#define cudaGetErrorString hipGetErrorString
+#define cudaHostRegister hipHostRegister
+#define cudaHostUnregister hipHostUnregister
+#define cudaMemGetInfo hipMemGetInfo
+#define cudaEventCreate hipEventCreate
+#define cudaEventRecord hipEventRecord
+#define cudaEventSynchronize hipEventSynchronize
+#define cudaEventElapsedTime hipEventElapsedTime
 #define cudaOccupancyMaxPotentialBlockSize hipOccupancyMaxPotentialBlockSize
 
 #endif

@@ -8,6 +8,8 @@
 using cusparseHandle_t = void *;
 using cusparseMatDescr_t = void *;
 using cusparseStatus_t = int;
+using bsrilu02Info_t = void *;
+using bsrsv2Info_t = void *;
 using cusparseSolvePolicy_t = int;
 using cusparseOperation_t = int;
 using cusparseDirection_t = int;
