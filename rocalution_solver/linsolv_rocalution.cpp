@@ -145,7 +145,10 @@ int linsolv_rocalution::setup()
   impl->gmres.SetPreconditioner(impl->jacobi);
   impl->gmres.SetOperator(impl->A);
   // Absolute, relative, divergence, maximum iterations.
-  impl->gmres.Init(impl->tolerance, impl->tolerance, 1.0e8, impl->max_iters);
+  // Absolute tolerance stays at 0. A row-scaled right-hand side is small even
+  // when the original residual is not, and a nonzero absolute stop was
+  // accepting a zero update.
+  impl->gmres.Init(0.0, impl->tolerance, 1.0e8, impl->max_iters);
   const int basis = impl->n_rows < 400 ? impl->n_rows : 400;
   impl->gmres.SetBasisSize(basis);
   impl->gmres.Verbose(impl->verbose);

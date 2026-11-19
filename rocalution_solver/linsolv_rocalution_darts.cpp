@@ -102,7 +102,30 @@ namespace opendarts
       scaled_b_.resize(row_scale_.size());
       for (std::size_t i = 0; i < row_scale_.size(); ++i)
         scaled_b_[i] = B[i] * row_scale_[i];
-      return solver_.solve(scaled_b_.data(), X);
+      const int solved = solver_.solve(scaled_b_.data(), X);
+      const int n = scalar_->n_rows();
+      const auto *row = scalar_->row_ptr();
+      const auto *col = scalar_->col_ind();
+      const auto *val = scalar_->values();
+      double b2 = 0.0;
+      double r2 = 0.0;
+      for (int i = 0; i < n; ++i)
+      {
+        double ax = 0.0;
+        for (int k = row[i]; k < row[i + 1]; ++k)
+          ax += val[k] * X[col[k]];
+        const double r = B[i] - ax;
+        r2 += r * r;
+        b2 += B[i] * B[i];
+      }
+      if (b2 == 0.0)
+        return 0;
+      const double rel = std::sqrt(r2 / b2);
+      // rocALUTION reports the preconditioned residual. Accept the step only
+      // when the original system was actually reduced.
+      if (rel <= std::max(tolerance_ * 50.0, 1e-8))
+        return 0;
+      return solved == 0 ? -1 : solved;
     }
 
     int linsolv_rocalution_solver::get_n_iters()
