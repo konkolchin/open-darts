@@ -52,10 +52,12 @@ void stop_platform()
 } // namespace
 
 linsolv_rocalution::linsolv_rocalution(int device_num)
-  : impl(new Impl)
+  : impl(nullptr)
 {
-  impl->device_num = device_num;
+  // rocALUTION objects assert that the backend is already initialized.
   start_platform(device_num);
+  impl = new Impl;
+  impl->device_num = device_num;
   ++g_alive;
 }
 
