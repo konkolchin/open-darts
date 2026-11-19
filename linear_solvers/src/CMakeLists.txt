@@ -393,9 +393,11 @@ if(WITH_ROCALUTION)
     PROPERTIES
       LANGUAGE HIP
       COMPILE_OPTIONS "-U_GLIBCXX_USE_CXX11_ABI;-D_GLIBCXX_USE_CXX11_ABI=1")
+  # The HIP test link does not pull libgomp. AMGCL's OpenMP is not needed
+  # for these systems, so this file is built without it.
   set_source_files_properties(${_od_amgcl_cxx}
     PROPERTIES
-      COMPILE_OPTIONS "-U_GLIBCXX_USE_CXX11_ABI;-D_GLIBCXX_USE_CXX11_ABI=1")
+      COMPILE_OPTIONS "-U_GLIBCXX_USE_CXX11_ABI;-D_GLIBCXX_USE_CXX11_ABI=1;-fno-openmp")
   target_sources(linear_solvers PRIVATE ${_od_rocalution_hip} ${_od_rocalution_cxx} ${_od_amgcl_cxx})
   target_link_libraries(linear_solvers PUBLIC rocalution::rocalution)
   target_include_directories(linear_solvers
