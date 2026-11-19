@@ -111,7 +111,8 @@ int linsolv_rocalution::init(int n_rows,
   impl->row_ptr.assign(row_ptr, row_ptr + n_rows + 1);
   impl->col_ind.assign(col_ind, col_ind + nnz);
   impl->values.assign(values, values + nnz);
-  impl->built = false;
+  // Leave impl->built alone. setup() must Clear() a live solver before
+  // SetOperator; clearing the flag here made the next Newton step skip that.
   return 0;
 }
 
