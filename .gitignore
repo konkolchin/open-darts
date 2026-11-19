@@ -2,6 +2,8 @@
 .DS_Store
 
 # binaries
+rocalution_solver/test_linsolv_rocalution
+rocalution_solver/test_linsolv_rocalution_spd
 darts/*.so*
 darts/*.pyd
 darts/*.dll

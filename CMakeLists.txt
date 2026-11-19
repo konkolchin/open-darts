@@ -321,6 +321,14 @@ add_feature_info(WITH_AMGX WITH_AMGX "Build the AMGX GPU solver")
 # cuDSS-less GPU machine still builds. Disable explicitly with -D WITH_CUDSS=OFF.
 option(WITH_CUDSS "Build the cuDSS GPU direct solver (prebuilt NVIDIA library)" ON)
 add_feature_info(WITH_CUDSS WITH_CUDSS "Build the cuDSS GPU direct solver")
+# rocALUTION is the AMD sparse iterative library. Like cuDSS it is prebuilt
+# (the ROCm package); this option does not compile rocALUTION from source and
+# it does not turn engine kernels into HIP. OFF by default so an NVIDIA GPU
+# build is unchanged. On the Radeon, configure with -D WITH_ROCALUTION=ON
+# (the build script forwards OD_CMAKE_ARGS). That compiles linsolv_rocalution
+# into linear_solvers and builds the two regression executables.
+option(WITH_ROCALUTION "Link prebuilt rocALUTION from ROCm and build its regression suites" OFF)
+add_feature_info(WITH_ROCALUTION WITH_ROCALUTION "Link prebuilt rocALUTION and build its regression")
 # Pin the installed binaries to the CUDA toolkit they were linked against by
 # putting its library directory in the install RPATH (see the CUDA_INSTALL_RPATH
 # block further down for why mixing toolkits breaks the GPU linear solver).
@@ -637,9 +645,55 @@ endif()
 # ------------------------------------------------------------------------------
 
 
+# rocALUTION (AMD) -------------------------------------------------------------
+# Finds hipcc and librocalution, then lets linear_solvers compile the wrapper.
+# Engine kernels stay on the CUDA path; this block is not a GPU-config switch.
+if(WITH_ROCALUTION)
+  if(ENABLE_BOS_SOLVERS)
+    message(FATAL_ERROR
+      "WITH_ROCALUTION requires the in-tree linear_solvers library. "
+      "Configure with -D ENABLE_BOS_SOLVERS=OFF.")
+  endif()
+  if(NOT ROCM_PATH)
+    if(DEFINED ENV{ROCM_PATH} AND NOT "$ENV{ROCM_PATH}" STREQUAL "")
+      set(ROCM_PATH "$ENV{ROCM_PATH}")
+    else()
+      set(ROCM_PATH "/opt/rocm")
+    endif()
+    set(ROCM_PATH "${ROCM_PATH}" CACHE PATH "ROCm prefix used to find hipcc and rocALUTION")
+  endif()
+  if(NOT CMAKE_HIP_ARCHITECTURES)
+    execute_process(
+      COMMAND "${ROCM_PATH}/bin/amdgpu-arch"
+      OUTPUT_VARIABLE _od_hip_arch
+      OUTPUT_STRIP_TRAILING_WHITESPACE
+      ERROR_QUIET
+      RESULT_VARIABLE _od_hip_arch_rc)
+    if(_od_hip_arch_rc EQUAL 0 AND _od_hip_arch)
+      string(REGEX REPLACE "[\r\n]+" ";" _od_hip_arch "${_od_hip_arch}")
+      list(REMOVE_DUPLICATES _od_hip_arch)
+      set(CMAKE_HIP_ARCHITECTURES "${_od_hip_arch}" CACHE STRING "HIP offload architectures")
+    endif()
+  endif()
+  if(NOT CMAKE_HIP_COMPILER)
+    set(CMAKE_HIP_COMPILER "${ROCM_PATH}/bin/hipcc" CACHE FILEPATH "HIP compiler (hipcc)")
+  endif()
+  enable_language(HIP)
+  set(CMAKE_HIP_STANDARD 20)
+  set(CMAKE_HIP_STANDARD_REQUIRED ON)
+  include(thirdparty/thirdparty_rocalution.cmake)
+  add_compile_definitions(WITH_ROCALUTION)
+endif()
+# ------------------------------------------------------------------------------
+
+
 # openDARTS Linear solvers -----------------------------------------------------
 if(NOT ENABLE_BOS_SOLVERS)
   add_subdirectory(linear_solvers)
+endif()
+if(WITH_ROCALUTION)
+  enable_testing()
+  add_subdirectory(rocalution_solver)
 endif()
 # ------------------------------------------------------------------------------
 

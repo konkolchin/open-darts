@@ -201,6 +201,24 @@ if(CUDA)
     set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/linsolv_cudss.cpp PROPERTIES LANGUAGE CUDA)
   endif()
 endif()
+
+# rocALUTION is opt-in (-D WITH_ROCALUTION=ON) and is not a CUDA solver.
+# hipcc has to compile the wrapper because it includes rocALUTION headers.
+# librocalution is built with the default libstdc++ ABI. open-DARTS forces
+# _GLIBCXX_USE_CXX11_ABI=0 on every other translation unit, so undo that
+# for this file only. The public class does not pass std types across
+# the boundary (pointers and scalars only).
+if(WITH_ROCALUTION)
+  list(APPEND OD_LINEAR_SOLVERS_SRC_FILES
+    ${CMAKE_SOURCE_DIR}/rocalution_solver/linsolv_rocalution.cpp)
+  list(APPEND OD_LINEAR_SOLVERS_PUBLIC_HEADER_FILES
+    ${CMAKE_SOURCE_DIR}/rocalution_solver/linsolv_rocalution.hpp)
+  set_source_files_properties(
+    ${CMAKE_SOURCE_DIR}/rocalution_solver/linsolv_rocalution.cpp
+    PROPERTIES
+      LANGUAGE HIP
+      COMPILE_OPTIONS "-U_GLIBCXX_USE_CXX11_ABI;-D_GLIBCXX_USE_CXX11_ABI=1")
+endif()
 # ------------------------------------------------------------------------------
 
 # Auto-generated explicit template instantiations
@@ -344,6 +362,15 @@ if(CUDA)
     # Prebuilt shared library; the imported target carries its include dir.
     target_link_libraries(linear_solvers PUBLIC cudss::cudss)
   endif()
+endif()
+
+if(WITH_ROCALUTION)
+  # Prebuilt shared library. PUBLIC so the shared solvers library records
+  # the rocALUTION NEEDED entry and the ROCm RPATH.
+  target_link_libraries(linear_solvers PUBLIC rocalution::rocalution)
+  target_include_directories(linear_solvers
+    PRIVATE
+      ${CMAKE_SOURCE_DIR}/rocalution_solver)
 endif()
 
 # Define the include directories required internally (BUILD_INTERFACE)

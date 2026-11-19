@@ -1,6 +1,9 @@
-# Standalone rocALUTION solves of two DARTS test systems.
-# On the AMD box:
-#   cd rocalution_solver
+# Standalone shortcut for the two rocALUTION regression suites.
+# The suites are also targets of the open-DARTS CMake build:
+#   cmake -S . -B build -D WITH_ROCALUTION=ON -D OPENDARTS_CONFIG=MT
+#   cmake --build build --target test_linsolv_rocalution test_linsolv_rocalution_spd
+# This Makefile does not compile linsolv_rocalution into linear_solvers.
+# On the AMD box, from this directory:
 #   make
 #   ./test_linsolv_rocalution
 #   ./test_linsolv_rocalution_spd
