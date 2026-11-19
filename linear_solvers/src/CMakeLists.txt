@@ -201,24 +201,6 @@ if(CUDA)
     set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/linsolv_cudss.cpp PROPERTIES LANGUAGE CUDA)
   endif()
 endif()
-
-# rocALUTION is opt-in (-D WITH_ROCALUTION=ON) and is not a CUDA solver.
-# hipcc has to compile the wrapper because it includes rocALUTION headers.
-# librocalution is built with the default libstdc++ ABI. open-DARTS forces
-# _GLIBCXX_USE_CXX11_ABI=0 on every other translation unit, so undo that
-# for this file only. The public class does not pass std types across
-# the boundary (pointers and scalars only).
-if(WITH_ROCALUTION)
-  list(APPEND OD_LINEAR_SOLVERS_SRC_FILES
-    ${CMAKE_SOURCE_DIR}/rocalution_solver/linsolv_rocalution.cpp)
-  list(APPEND OD_LINEAR_SOLVERS_PUBLIC_HEADER_FILES
-    ${CMAKE_SOURCE_DIR}/rocalution_solver/linsolv_rocalution.hpp)
-  set_source_files_properties(
-    ${CMAKE_SOURCE_DIR}/rocalution_solver/linsolv_rocalution.cpp
-    PROPERTIES
-      LANGUAGE HIP
-      COMPILE_OPTIONS "-U_GLIBCXX_USE_CXX11_ABI;-D_GLIBCXX_USE_CXX11_ABI=1")
-endif()
 # ------------------------------------------------------------------------------
 
 # Auto-generated explicit template instantiations
@@ -364,15 +346,6 @@ if(CUDA)
   endif()
 endif()
 
-if(WITH_ROCALUTION)
-  # Prebuilt shared library. PUBLIC so the shared solvers library records
-  # the rocALUTION NEEDED entry and the ROCm RPATH.
-  target_link_libraries(linear_solvers PUBLIC rocalution::rocalution)
-  target_include_directories(linear_solvers
-    PRIVATE
-      ${CMAKE_SOURCE_DIR}/rocalution_solver)
-endif()
-
 # Define the include directories required internally (BUILD_INTERFACE)
 # and the ones to propagate when linking to this library (INSTALL_INTERFACE)
 target_include_directories(linear_solvers
@@ -394,6 +367,26 @@ endif()
 source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR}/.. FILES ${OD_LINEAR_SOLVERS_SRC_FILES})
 source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR}/.. FILES ${OD_MGR_SOLVER_SRC_FILES})
 source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR}/.. FILES ${OD_LINEAR_SOLVERS_PUBLIC_HEADER_FILES})
+
+# Added after source_group: the wrapper lives outside linear_solvers/, and
+# source_group(TREE) rejects paths that are not under its ROOT.
+# hipcc/Clang compiles it because the rocALUTION headers are HIP headers.
+# librocalution uses the default libstdc++ ABI, so this file must not
+# inherit _GLIBCXX_USE_CXX11_ABI=0. Its public methods pass only pointers
+# and scalars.
+if(WITH_ROCALUTION)
+  set(_od_rocalution_src "${CMAKE_SOURCE_DIR}/rocalution_solver/linsolv_rocalution.cpp")
+  set_source_files_properties(${_od_rocalution_src}
+    PROPERTIES
+      LANGUAGE HIP
+      COMPILE_OPTIONS "-U_GLIBCXX_USE_CXX11_ABI;-D_GLIBCXX_USE_CXX11_ABI=1")
+  target_sources(linear_solvers PRIVATE ${_od_rocalution_src})
+  target_link_libraries(linear_solvers PUBLIC rocalution::rocalution)
+  target_include_directories(linear_solvers
+    PRIVATE
+      ${CMAKE_SOURCE_DIR}/rocalution_solver)
+  unset(_od_rocalution_src)
+endif()
 
 message(STATUS "Unified linear_solvers library configured (includes MGR)")
 
