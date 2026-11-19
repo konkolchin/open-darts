@@ -10,6 +10,7 @@
 // The matrix is the open-DARTS SuperLU test: 12 rows, offsets -2, 0, +2,
 // values -2, 1, 2, right-hand side 1. The reference is that test's CPU solution.
 // CG and aggregation AMG are omitted: this matrix is not symmetric positive definite.
+// Ruge-Stueben AMG is omitted: rocALUTION rejects this 12-row system as too small.
 
 using Matrix = rocalution::LocalMatrix<double>;
 using Vector = rocalution::LocalVector<double>;
@@ -164,8 +165,6 @@ int main()
       "BiCGStab + ILU(0)", n, row_ptr, col_ind, values, b, reference, error_tol);
   failed += run_pair<rocalution::GMRES<Matrix, Vector, double>, rocalution::MultiColoredILU<Matrix, Vector, double>>(
       "GMRES + MultiColoredILU", n, row_ptr, col_ind, values, b, reference, error_tol);
-  failed += run_pair<rocalution::GMRES<Matrix, Vector, double>, rocalution::RugeStuebenAMG<Matrix, Vector, double>>(
-      "GMRES + RugeStuebenAMG", n, row_ptr, col_ind, values, b, reference, error_tol);
 
   std::cout << (failed == 0 ? "SUITE OK" : "SUITE FAIL") << " failed=" << failed << std::endl;
   return failed == 0 ? 0 : 1;
