@@ -1,8 +1,6 @@
 #include "linsolv_rocalution_darts.hpp"
 
-#include <algorithm>
 #include <cmath>
-#include <vector>
 
 #include "block_csr_matrix.hpp"
 #include "scalar_csr_adapter.hpp"
@@ -57,26 +55,8 @@ namespace opendarts
         return -1;
       scalar_->refresh();
       const int n = scalar_->n_rows();
-      const auto *row = scalar_->row_ptr();
-      const auto *col = scalar_->col_ind();
-      const auto *val = scalar_->values();
-      const int nnz = scalar_->nnz();
-      std::vector<double> scaled(val, val + nnz);
-      row_scale_.assign(static_cast<std::size_t>(n), 1.0);
-      for (int i = 0; i < n; ++i)
-      {
-        double max_abs = 0.0;
-        for (int k = row[i]; k < row[i + 1]; ++k)
-          max_abs = std::max(max_abs, std::abs(scaled[static_cast<std::size_t>(k)]));
-        if (max_abs > 0.0)
-        {
-          const double scale = 1.0 / max_abs;
-          row_scale_[static_cast<std::size_t>(i)] = scale;
-          for (int k = row[i]; k < row[i + 1]; ++k)
-            scaled[static_cast<std::size_t>(k)] *= scale;
-        }
-      }
-      const int rc = solver_.init(n, row, col, scaled.data(), max_iters_, tolerance_);
+      const int rc = solver_.init(n, scalar_->row_ptr(), scalar_->col_ind(), scalar_->values(),
+          max_iters_, tolerance_);
       if (rc != 0)
         return rc;
       ready_ = solver_.setup() == 0;
@@ -99,10 +79,7 @@ namespace opendarts
     {
       if (!ready_ || B == nullptr || X == nullptr)
         return -1;
-      scaled_b_.resize(row_scale_.size());
-      for (std::size_t i = 0; i < row_scale_.size(); ++i)
-        scaled_b_[i] = B[i] * row_scale_[i];
-      const int solved = solver_.solve(scaled_b_.data(), X);
+      const int solved = solver_.solve(B, X);
       const int n = scalar_->n_rows();
       const auto *row = scalar_->row_ptr();
       const auto *col = scalar_->col_ind();
@@ -121,11 +98,9 @@ namespace opendarts
       if (b2 == 0.0)
         return 0;
       const double rel = std::sqrt(r2 / b2);
-      // Jacobi-GMRES drives the preconditioned residual well below the true
-      // one and then stalls. A true relative residual of 1e-2 is still a
-      // usable Newton step. A reported success with almost no reduction is a
-      // zero update and has to be rejected, or the well residual never moves.
-      if (rel <= std::max(tolerance_, 1.0e-2))
+      // FGMRES stops on this residual. Still reject a reported success that
+      // did not actually reduce it, which previously froze the well residual.
+      if (rel <= std::max(tolerance_ * 50.0, 1.0e-4))
         return 0;
       return solved == 0 ? -1 : solved;
     }

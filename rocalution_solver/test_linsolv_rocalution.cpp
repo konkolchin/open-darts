@@ -141,7 +141,7 @@ int main()
 
   // Keeps the rocALUTION platform initialized for the pairs below.
   linsolv_rocalution adapter(0);
-  std::cout << "---- linsolv_rocalution GMRES + Jacobi" << std::endl;
+  std::cout << "---- linsolv_rocalution FGMRES + Jacobi" << std::endl;
   std::vector<double> x(n, 0.0);
   int adapter_rc = -1;
   if (adapter.init(n, row_ptr.data(), col_ind.data(), values.data(), 50, 1e-10) == 0

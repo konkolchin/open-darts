@@ -2,8 +2,9 @@
 #define LINSOLV_ROCALUTION_BACKEND_HPP
 
 // Pointer-only rocALUTION pairs. The header is safe for an ABI-0 caller.
-// kind 0: GMRES + SAAMG, left on the host (AMG setup stays on the host).
-// kind 1: GMRES + ILU(0), moved to the accelerator.
+// kind 0: FGMRES + SAAMG, left on the host (AMG setup stays on the host).
+// kind 1: FGMRES + ILU(0), moved to the accelerator.
+// FGMRES is right-preconditioned, so the iteration stops on the original residual.
 
 struct rocalution_pair;
 

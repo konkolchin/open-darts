@@ -27,7 +27,7 @@ struct pair_impl : rocalution_pair
   Matrix A;
   Vector rhs;
   Vector x;
-  rocalution::GMRES<Matrix, Vector, double> solver;
+  rocalution::FGMRES<Matrix, Vector, double> solver;
   Prec prec;
   std::vector<int> row_ptr;
   std::vector<int> col_ind;

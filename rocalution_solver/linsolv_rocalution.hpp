@@ -3,8 +3,10 @@
 
 // Scalar CSR solver on rocALUTION. Same call order as linsolv_amgx:
 // init (structure and values), setup (build the preconditioner), solve (host vectors).
-// Block size 1. The Krylov method is GMRES and the preconditioner is Jacobi,
-// both of which rocALUTION runs on the GPU.
+// Block size 1. The Krylov method is FGMRES and the preconditioner is Jacobi,
+// both of which rocALUTION runs on the GPU. FGMRES is right-preconditioned, so
+// the stopping test is the original residual. Left-preconditioned GMRES was
+// stopping on the Jacobi residual while the well equations were unchanged.
 
 class linsolv_rocalution
 {

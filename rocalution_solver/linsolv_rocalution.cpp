@@ -24,7 +24,7 @@ struct linsolv_rocalution::Impl
   rocalution::LocalMatrix<double> A;
   rocalution::LocalVector<double> rhs;
   rocalution::LocalVector<double> x;
-  rocalution::GMRES<rocalution::LocalMatrix<double>, rocalution::LocalVector<double>, double> gmres;
+  rocalution::FGMRES<rocalution::LocalMatrix<double>, rocalution::LocalVector<double>, double> fgmres;
   rocalution::Jacobi<rocalution::LocalMatrix<double>, rocalution::LocalVector<double>, double> jacobi;
 };
 
@@ -80,7 +80,7 @@ linsolv_rocalution::~linsolv_rocalution()
 {
   if (impl->built)
   {
-    impl->gmres.Clear();
+    impl->fgmres.Clear();
     impl->jacobi.Clear();
     impl->A.Clear();
     impl->rhs.Clear();
@@ -123,7 +123,7 @@ int linsolv_rocalution::setup()
 
   if (impl->built)
   {
-    impl->gmres.Clear();
+    impl->fgmres.Clear();
     impl->jacobi.Clear();
     impl->A.Clear();
     impl->rhs.Clear();
@@ -142,26 +142,24 @@ int linsolv_rocalution::setup()
   impl->rhs.Allocate("b", impl->n_rows);
   impl->x.Allocate("x", impl->n_rows);
 
-  impl->gmres.SetPreconditioner(impl->jacobi);
-  impl->gmres.SetOperator(impl->A);
+  impl->fgmres.SetPreconditioner(impl->jacobi);
+  impl->fgmres.SetOperator(impl->A);
   // Absolute, relative, divergence, maximum iterations.
-  // Absolute tolerance stays at 0. A row-scaled right-hand side is small even
-  // when the original residual is not, and a nonzero absolute stop was
-  // accepting a zero update.
-  impl->gmres.Init(0.0, impl->tolerance, 1.0e8, impl->max_iters);
+  // Absolute tolerance stays at 0. FGMRES stops on the true relative residual.
+  impl->fgmres.Init(0.0, impl->tolerance, 1.0e8, impl->max_iters);
   const int basis = impl->n_rows < 400 ? impl->n_rows : 400;
-  impl->gmres.SetBasisSize(basis);
-  impl->gmres.Verbose(impl->verbose);
-  impl->gmres.Build();
+  impl->fgmres.SetBasisSize(basis);
+  impl->fgmres.Verbose(impl->verbose);
+  impl->fgmres.Build();
 
   impl->A.MoveToAccelerator();
   impl->rhs.MoveToAccelerator();
   impl->x.MoveToAccelerator();
-  impl->gmres.MoveToAccelerator();
+  impl->fgmres.MoveToAccelerator();
   impl->built = true;
 
   if (impl->verbose)
-    std::cout << "rocALUTION: GMRES + Jacobi on device " << impl->device_num
+    std::cout << "rocALUTION: FGMRES + Jacobi on device " << impl->device_num
               << ", n=" << impl->n_rows << ", nnz=" << impl->nnz << std::endl;
   return 0;
 }
@@ -173,12 +171,12 @@ int linsolv_rocalution::solve(const double* b, double* x)
 
   impl->rhs.CopyFromHostData(b);
   impl->x.Zeros();
-  impl->gmres.Solve(impl->rhs, &impl->x);
+  impl->fgmres.Solve(impl->rhs, &impl->x);
   impl->x.CopyToHostData(x);
 
-  impl->n_iters = impl->gmres.GetIterationCount();
-  impl->residual = impl->gmres.GetCurrentResidual();
-  const int status = impl->gmres.GetSolverStatus();
+  impl->n_iters = impl->fgmres.GetIterationCount();
+  impl->residual = impl->fgmres.GetCurrentResidual();
+  const int status = impl->fgmres.GetSolverStatus();
   if (impl->verbose)
     std::cout << "rocALUTION: status " << status << ", iterations " << impl->n_iters
               << ", residual " << impl->residual << std::endl;
