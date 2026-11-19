@@ -26,3 +26,6 @@
 [submodule "thirdparty/superlu"]
 	path = thirdparty/superlu
 	url = https://github.com/xiaoyeli/superlu.git
+[submodule "thirdparty/amgcl"]
+	path = thirdparty/amgcl
+	url = https://github.com/ddemidov/amgcl.git

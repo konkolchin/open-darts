@@ -1,9 +1,67 @@
 #include "linsolv_rocalution.hpp"
 
+#include "amgcl_prec.hpp"
+
 #include <iostream>
 #include <vector>
 
 #include <rocalution/rocalution.hpp>
+
+namespace
+{
+using matrix = rocalution::LocalMatrix<double>;
+using vector = rocalution::LocalVector<double>;
+
+// rocALUTION preconditioner slot. apply() runs on the host; FGMRES stays on
+// the host with it so the Krylov basis and the AMGCL vectors are the same memory.
+class amgcl_slot : public rocalution::Preconditioner<matrix, vector, double>
+{
+public:
+  ~amgcl_slot() override { Clear(); }
+
+  void Print(void) const override {}
+
+  void Solve(const vector &rhs, vector *x) override
+  {
+    if (prec_ == nullptr || x == nullptr)
+      return;
+    host_b_.resize(static_cast<std::size_t>(n_));
+    host_x_.resize(static_cast<std::size_t>(n_));
+    rhs.CopyToHostData(host_b_.data());
+    amgcl_prec_apply(prec_, host_b_.data(), host_x_.data());
+    x->CopyFromHostData(host_x_.data());
+  }
+
+  void Build(void) override
+  {
+    this->build_ = prec_ != nullptr;
+  }
+
+  void Clear(void) override
+  {
+    amgcl_prec_destroy(prec_);
+    prec_ = nullptr;
+    this->build_ = false;
+  }
+
+  void arm(int kind, int block_size, int n, const int *row, const int *col, const double *val)
+  {
+    Clear();
+    n_ = n;
+    prec_ = amgcl_prec_create(kind, block_size, n, row, col, val);
+  }
+
+protected:
+  void MoveToHostLocalData_(void) override {}
+  void MoveToAcceleratorLocalData_(void) override {}
+
+private:
+  amgcl_prec *prec_ = nullptr;
+  int n_ = 0;
+  std::vector<double> host_b_;
+  std::vector<double> host_x_;
+};
+} // namespace
 
 struct linsolv_rocalution::Impl
 {
@@ -15,6 +73,8 @@ struct linsolv_rocalution::Impl
   int n_iters = 0;
   double residual = 0.0;
   int verbose = 1;
+  int prec_kind = 0;
+  int block_size = 1;
   bool built = false;
 
   std::vector<int> row_ptr;
@@ -24,8 +84,11 @@ struct linsolv_rocalution::Impl
   rocalution::LocalMatrix<double> A;
   rocalution::LocalVector<double> rhs;
   rocalution::LocalVector<double> x;
-  rocalution::FGMRES<rocalution::LocalMatrix<double>, rocalution::LocalVector<double>, double> fgmres;
+  // Declared before fgmres so the Krylov solver is destroyed first and can
+  // still reach its preconditioner from its own destructor.
   rocalution::Jacobi<rocalution::LocalMatrix<double>, rocalution::LocalVector<double>, double> jacobi;
+  amgcl_slot amgcl;
+  rocalution::FGMRES<rocalution::LocalMatrix<double>, rocalution::LocalVector<double>, double> fgmres;
 };
 
 namespace
@@ -66,6 +129,13 @@ void rocalution_platform_release()
     stop_platform();
 }
 
+void linsolv_rocalution::set_preconditioner(int kind, int block_size)
+{
+  impl->prec_kind = kind;
+  if (block_size > 0)
+    impl->block_size = block_size;
+}
+
 linsolv_rocalution::linsolv_rocalution(int device_num, int verbose)
   : impl(nullptr)
 {
@@ -82,6 +152,7 @@ linsolv_rocalution::~linsolv_rocalution()
   {
     impl->fgmres.Clear();
     impl->jacobi.Clear();
+    impl->amgcl.Clear();
     impl->A.Clear();
     impl->rhs.Clear();
     impl->x.Clear();
@@ -125,6 +196,7 @@ int linsolv_rocalution::setup()
   {
     impl->fgmres.Clear();
     impl->jacobi.Clear();
+    impl->amgcl.Clear();
     impl->A.Clear();
     impl->rhs.Clear();
     impl->x.Clear();
@@ -142,7 +214,15 @@ int linsolv_rocalution::setup()
   impl->rhs.Allocate("b", impl->n_rows);
   impl->x.Allocate("x", impl->n_rows);
 
-  impl->fgmres.SetPreconditioner(impl->jacobi);
+  const bool amgcl = impl->prec_kind != 0;
+  if (amgcl)
+  {
+    impl->amgcl.arm(impl->prec_kind, impl->block_size, impl->n_rows,
+        impl->row_ptr.data(), impl->col_ind.data(), impl->values.data());
+    impl->fgmres.SetPreconditioner(impl->amgcl);
+  }
+  else
+    impl->fgmres.SetPreconditioner(impl->jacobi);
   impl->fgmres.SetOperator(impl->A);
   // Absolute, relative, divergence, maximum iterations.
   // Absolute tolerance stays at 0. FGMRES stops on the true relative residual.
@@ -152,14 +232,24 @@ int linsolv_rocalution::setup()
   impl->fgmres.Verbose(impl->verbose);
   impl->fgmres.Build();
 
-  impl->A.MoveToAccelerator();
-  impl->rhs.MoveToAccelerator();
-  impl->x.MoveToAccelerator();
-  impl->fgmres.MoveToAccelerator();
+  // AMGCL runs on the host. Keep FGMRES there too, so a preconditioner
+  // application does not bounce the Krylov vector through the device.
+  if (!amgcl)
+  {
+    impl->A.MoveToAccelerator();
+    impl->rhs.MoveToAccelerator();
+    impl->x.MoveToAccelerator();
+    impl->fgmres.MoveToAccelerator();
+  }
   impl->built = true;
 
   if (impl->verbose)
-    std::cout << "rocALUTION: FGMRES + Jacobi on device " << impl->device_num
+    std::cout << "rocALUTION: FGMRES + "
+              << (impl->prec_kind == 3 ? "AMGCL CPR"
+                      : impl->prec_kind == 2 ? "AMGCL AMG"
+                      : impl->prec_kind == 1 ? "AMGCL ILU(0)"
+                                             : "Jacobi")
+              << (amgcl ? " on host" : " on device ") << impl->device_num
               << ", n=" << impl->n_rows << ", nnz=" << impl->nnz << std::endl;
   return 0;
 }

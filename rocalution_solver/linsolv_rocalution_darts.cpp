@@ -41,6 +41,7 @@ namespace opendarts
         return -1;
       A_ = block;
       scalar_ = std::make_unique<scalar_csr_adapter>(*block);
+      solver_.set_preconditioner(1, block->block_size());
       if (max_iters > 0)
         max_iters_ = max_iters;
       if (tolerance > 0.0)

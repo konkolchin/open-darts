@@ -4,8 +4,7 @@
 //--------------------------------------------------------------------------
 
 // DARTS linear_solver that expands a host block-CSR Jacobian to scalar CSR
-// and solves it with rocALUTION FGMRES + Jacobi. FGMRES stops on the original
-// residual, so the Jacobian is handed over without row scaling.
+// and solves it with rocALUTION FGMRES. The preconditioner is AMGCL ILU(0).
 
 #include <memory>
 

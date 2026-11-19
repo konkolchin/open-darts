@@ -3,8 +3,8 @@
 #define OPENDARTS_LINEAR_SOLVERS_LINSOLV_ROCALUTION_CPR_HPP
 //--------------------------------------------------------------------------
 
-// CPR composition: rocALUTION AMG on the pressure block (built on the host)
-// and rocALUTION ILU on the scalar full system. Not a change to the two
+// CPR composition: rocALUTION FGMRES, AMGCL CPR preconditioner. Pressure is
+// an algebraic multigrid, the full system is ILU(0). Not a change to the two
 // standalone rocALUTION suites.
 
 #include "linear_solver.hpp"

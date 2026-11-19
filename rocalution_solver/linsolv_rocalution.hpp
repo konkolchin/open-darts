@@ -1,12 +1,10 @@
 #ifndef LINSOLV_ROCALUTION_HPP
 #define LINSOLV_ROCALUTION_HPP
 
-// Scalar CSR solver on rocALUTION. Same call order as linsolv_amgx:
-// init (structure and values), setup (build the preconditioner), solve (host vectors).
-// Block size 1. The Krylov method is FGMRES and the preconditioner is Jacobi,
-// both of which rocALUTION runs on the GPU. FGMRES is right-preconditioned, so
-// the stopping test is the original residual. Left-preconditioned GMRES was
-// stopping on the Jacobi residual while the well equations were unchanged.
+// Scalar CSR solver. rocALUTION FGMRES is the Krylov method. The preconditioner
+// is either rocALUTION Jacobi (the regression tests) or an AMGCL preconditioner
+// (ILU(0), AMG, or CPR) applied through rocALUTION's preconditioner slot.
+// FGMRES is right-preconditioned, so it stops on the original residual.
 
 class linsolv_rocalution
 {
@@ -16,6 +14,10 @@ public:
 
   linsolv_rocalution(const linsolv_rocalution&) = delete;
   linsolv_rocalution& operator=(const linsolv_rocalution&) = delete;
+
+  // kind 0: rocALUTION Jacobi. 1: AMGCL ILU(0). 2: AMGCL AMG. 3: AMGCL CPR.
+  // block_size is the number of unknowns per cell and is used by CPR only.
+  void set_preconditioner(int kind, int block_size);
 
   // row_ptr has n_rows + 1 entries. col_ind and values have row_ptr[n_rows] entries.
   // Column indices in each row are increasing.
