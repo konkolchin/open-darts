@@ -646,7 +646,7 @@ endif()
 
 
 # rocALUTION (AMD) -------------------------------------------------------------
-# Finds hipcc and librocalution, then lets linear_solvers compile the wrapper.
+# Finds ROCm Clang and librocalution, then lets linear_solvers compile the wrapper.
 # Engine kernels stay on the CUDA path; this block is not a GPU-config switch.
 if(WITH_ROCALUTION)
   if(ENABLE_BOS_SOLVERS)
@@ -663,20 +663,35 @@ if(WITH_ROCALUTION)
     set(ROCM_PATH "${ROCM_PATH}" CACHE PATH "ROCm prefix used to find hipcc and rocALUTION")
   endif()
   if(NOT CMAKE_HIP_ARCHITECTURES)
-    execute_process(
-      COMMAND "${ROCM_PATH}/bin/amdgpu-arch"
-      OUTPUT_VARIABLE _od_hip_arch
-      OUTPUT_STRIP_TRAILING_WHITESPACE
-      ERROR_QUIET
-      RESULT_VARIABLE _od_hip_arch_rc)
-    if(_od_hip_arch_rc EQUAL 0 AND _od_hip_arch)
-      string(REGEX REPLACE "[\r\n]+" ";" _od_hip_arch "${_od_hip_arch}")
-      list(REMOVE_DUPLICATES _od_hip_arch)
-      set(CMAKE_HIP_ARCHITECTURES "${_od_hip_arch}" CACHE STRING "HIP offload architectures")
+    find_program(_od_amdgpu_arch amdgpu-arch
+      HINTS "${ROCM_PATH}/llvm/bin" "${ROCM_PATH}/lib/llvm/bin" "${ROCM_PATH}/bin")
+    if(_od_amdgpu_arch)
+      execute_process(
+        COMMAND "${_od_amdgpu_arch}"
+        OUTPUT_VARIABLE _od_hip_arch
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+        RESULT_VARIABLE _od_hip_arch_rc)
+      if(_od_hip_arch_rc EQUAL 0 AND _od_hip_arch)
+        string(REGEX REPLACE "[\r\n]+" ";" _od_hip_arch "${_od_hip_arch}")
+        list(REMOVE_DUPLICATES _od_hip_arch)
+        set(CMAKE_HIP_ARCHITECTURES "${_od_hip_arch}" CACHE STRING "HIP offload architectures")
+      endif()
     endif()
+    unset(_od_amdgpu_arch CACHE)
   endif()
+  # CMake 3.21+ rejects the hipcc wrapper as CMAKE_HIP_COMPILER. The
+  # ROCm Clang is the compiler; hipcc only forwards to it.
   if(NOT CMAKE_HIP_COMPILER)
-    set(CMAKE_HIP_COMPILER "${ROCM_PATH}/bin/hipcc" CACHE FILEPATH "HIP compiler (hipcc)")
+    if(EXISTS "${ROCM_PATH}/llvm/bin/clang++")
+      set(_od_hip_compiler "${ROCM_PATH}/llvm/bin/clang++")
+    elseif(EXISTS "${ROCM_PATH}/bin/amdclang++")
+      set(_od_hip_compiler "${ROCM_PATH}/bin/amdclang++")
+    else()
+      set(_od_hip_compiler "${ROCM_PATH}/bin/hipcc")
+    endif()
+    set(CMAKE_HIP_COMPILER "${_od_hip_compiler}" CACHE FILEPATH "HIP compiler (ROCm Clang, not the hipcc wrapper)")
+    unset(_od_hip_compiler)
   endif()
   enable_language(HIP)
   set(CMAKE_HIP_STANDARD 20)
