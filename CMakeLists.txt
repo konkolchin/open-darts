@@ -148,9 +148,8 @@ elseif(${OPENDARTS_CONFIG} STREQUAL "MT" OR GPU_CONFIG)
   # partition (see linear_solvers/include/omp_partition.hpp), so an MT build no longer
   # depends on the proprietary multi-threaded bos_solvers. Pass
   # -D BOS_SOLVERS_DIR=<path> to link the proprietary bos_solvers instead.
-  if (GPU_CONFIG)
-    set(CUDA 1)
-  endif()
+  # CUDA is not set here. OPENDARTS_CONFIG=GPU becomes the NVIDIA CUDA build
+  # only when WITH_ROCALUTION is off; with it, the GPU engine is HIP.
   if(NOT ENABLE_BOS_SOLVERS)
     message(STATUS "  openDARTS ${OPENDARTS_CONFIG} build using the in-tree open-source solvers (no BOS_SOLVERS_DIR)")
   endif()
@@ -322,13 +321,22 @@ add_feature_info(WITH_AMGX WITH_AMGX "Build the AMGX GPU solver")
 option(WITH_CUDSS "Build the cuDSS GPU direct solver (prebuilt NVIDIA library)" ON)
 add_feature_info(WITH_CUDSS WITH_CUDSS "Build the cuDSS GPU direct solver")
 # rocALUTION is the AMD sparse iterative library. Like cuDSS it is prebuilt
-# (the ROCm package); this option does not compile rocALUTION from source and
-# it does not turn engine kernels into HIP. OFF by default so an NVIDIA GPU
-# build is unchanged. On the Radeon, configure with -D WITH_ROCALUTION=ON
-# (the build script forwards OD_CMAKE_ARGS). That compiles linsolv_rocalution
-# into linear_solvers and builds the two regression executables.
+# (the ROCm package); this option does not compile rocALUTION from source.
+# OFF by default, so an NVIDIA GPU build is unchanged. Together with
+# OPENDARTS_CONFIG=GPU it selects the HIP engine (OD_HIP_GPU) and does not
+# set CUDA. On the Radeon, configure with -D OPENDARTS_CONFIG=GPU
+# -D WITH_ROCALUTION=ON. That compiles linsolv_rocalution into linear_solvers.
 option(WITH_ROCALUTION "Link prebuilt rocALUTION from ROCm and build its regression suites" OFF)
 add_feature_info(WITH_ROCALUTION WITH_ROCALUTION "Link prebuilt rocALUTION and build its regression")
+# OPENDARTS_CONFIG=GPU is the GPU engine. WITH_ROCALUTION selects the AMD
+# implementation of that configuration (HIP, no CUDA). Without it, GPU stays
+# the NVIDIA CUDA build.
+if(GPU_CONFIG AND WITH_ROCALUTION)
+  set(OD_HIP_GPU 1)
+  message(STATUS "  GPU configuration: HIP and rocALUTION (CUDA is not enabled)")
+elseif(GPU_CONFIG)
+  set(CUDA 1)
+endif()
 # Pin the installed binaries to the CUDA toolkit they were linked against by
 # putting its library directory in the install RPATH (see the CUDA_INSTALL_RPATH
 # block further down for why mixing toolkits breaks the GPU linear solver).
@@ -647,7 +655,9 @@ endif()
 
 # rocALUTION (AMD) -------------------------------------------------------------
 # Finds ROCm Clang and librocalution, then lets linear_solvers compile the wrapper.
-# Engine kernels stay on the CUDA path; this block is not a GPU-config switch.
+# With OPENDARTS_CONFIG=GPU this is also the HIP engine: WITH_GPU is set here
+# and CUDA stays off. A rocALUTION build that is not the GPU configuration
+# only adds the solver library.
 if(WITH_ROCALUTION)
   if(ENABLE_BOS_SOLVERS)
     message(FATAL_ERROR
@@ -698,6 +708,24 @@ if(WITH_ROCALUTION)
   set(CMAKE_HIP_STANDARD_REQUIRED ON)
   include(thirdparty/thirdparty_rocalution.cmake)
   add_compile_definitions(WITH_ROCALUTION)
+  if(OD_HIP_GPU)
+    add_compile_definitions(WITH_GPU OD_HIP_GPU)
+    find_library(OD_AMDHIP_LIBRARY amdhip64
+      HINTS "${ROCM_PATH}/lib" "${ROCM_PATH}/lib64")
+    if(NOT OD_AMDHIP_LIBRARY)
+      message(FATAL_ERROR "amdhip64 not found under ${ROCM_PATH}")
+    endif()
+    # hip_compat is first so the shared device sources, which still spell the
+    # runtime calls the way the NVIDIA sources do, bind to hipMalloc and the
+    # rest. New engine allocation goes through hipMalloc in gpu_tools.h.
+    target_include_directories(opendarts_compiler_flags BEFORE INTERFACE
+      "${CMAKE_SOURCE_DIR}/rocalution_solver/hip_compat"
+      "${ROCM_PATH}/include")
+    include_directories(BEFORE
+      "${CMAKE_SOURCE_DIR}/rocalution_solver/hip_compat"
+      "${ROCM_PATH}/include")
+    target_link_libraries(opendarts_compiler_flags INTERFACE "${OD_AMDHIP_LIBRARY}")
+  endif()
 endif()
 # ------------------------------------------------------------------------------
 

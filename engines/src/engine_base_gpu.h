@@ -22,6 +22,7 @@
 #include "gpu_tools.h"  // engine-local GPU kernel-launch helpers (engines/src)
 #ifdef WITH_GPU
 #ifdef OPENDARTS_LINEAR_SOLVERS
+#ifndef OD_HIP_GPU
 #include "linsolv_bicgstab.hpp"
 #include "linsolv_gmres_gpu.hpp"
 #include "linsolv_cusparse_ilu.hpp"
@@ -36,6 +37,7 @@
 #include "linsolv_amgx.hpp"
 #include "linsolv_cpr_gpu.hpp"
 #endif
+#endif // OD_HIP_GPU
 #else
 #include "linsolv_bicgstab.h"
 #endif
@@ -439,6 +441,10 @@ int engine_base_gpu::init_base(conn_mesh *mesh_, std::vector<ms_well *> &well_li
   // solver must never be shadowed by a freshly built one.
   if (!linear_solver && !linear_solver_external)
   {
+#ifdef OD_HIP_GPU
+    throw std::runtime_error(
+        "AMD GPU engine: set the rocALUTION CPR solver before init");
+#else
     // Factory-allocated solvers are engine-owned and deleted in ~engine_base.
     linear_solver_owned = true;
     // An EXPLICIT request must fail rather than run something else, and it must
@@ -780,6 +786,7 @@ int engine_base_gpu::init_base(conn_mesh *mesh_, std::vector<ms_well *> &well_li
     }
     }
 #endif // OPENDARTS_LINEAR_SOLVERS
+#endif // OD_HIP_GPU
   }
 
   // Print the solver name

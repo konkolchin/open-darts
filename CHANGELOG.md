@@ -1,3 +1,11 @@
+# #.#.# [Future]
+- Breaking changes:
+  - `DartsModel.init` defaults to the GPU platform. Pass `platform='cpu'` to keep the host engine.\
+  {- Before: m.init()  # platform='cpu' -}
+  {+ Now:    m.init()  # platform='gpu' +}
+- An AMD GPU build (`OPENDARTS_CONFIG=GPU` with rocALUTION) runs isothermal dead oil, 2 components and 2 phases, on the device. `models/2ph_do` with `init(platform='gpu')` uses `engine_super_gpu2_2`, evaluates the reservoir and well interpolators on the GPU, and solves the Newton system with rocALUTION CPR. Well rates stay within the existing relative tolerance of the CPU run.
+- The same AMD GPU build also runs isothermal compositional flow with 4 components and 3 phases. `models/3ph_comp_w` with `init(platform='gpu')` uses `engine_super_gpu4_3` and the 4-axis multilinear interpolator. The build must be configured with `OPENDARTS_MAX_DIMS` at least 4.
+
 # 2.1.0 [26-10-2026]
 - **PT evaluation for saturation initialization is now inferred automatically.** `PropertyContainer.compute_saturation(state_pt=None, evaluate_PT_from_PHflash=False)` is now `compute_saturation(state_pt=None)`. When `state_pt` is supplied, PH/PS flash objects automatically use their direct PT evaluation path. **Migration:** `compute_saturation(state, evaluate_PT_from_PHflash=True)` → `compute_saturation(state)`.
 - Add OLGA-style linear IPR support for controlling injectivity/productivity of DFM wells ([!305](https://gitlab.com/open-darts/open-darts/-/merge_requests/305))

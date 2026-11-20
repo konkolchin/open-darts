@@ -354,6 +354,15 @@ if (CUDA)
   )
 endif()
 
+if (OD_HIP_GPU)
+  set_source_files_properties(
+    ${CMAKE_CURRENT_SOURCE_DIR}/engine_base_gpu.cpp
+    PROPERTIES LANGUAGE HIP)
+  target_sources(engines_engines PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/engine_base_gpu.cpp
+  )
+endif()
+
 
 # We need to specify OPENDARTS_LINEAR_SOLVERS so that the compile is with
 # the opendarts linear solvers, otherwise it uses the old linear solvers

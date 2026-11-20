@@ -209,7 +209,7 @@ class DartsModel:
     def init(
         self,
         discr_type: str = "tpfa",
-        platform: str = "cpu",
+        platform: str = "gpu",
         restart: bool = False,
         verbose: int | None = None,
         itor_type: str = "multilinear",
@@ -302,7 +302,12 @@ class DartsModel:
             verbose_evaluators=int(verbose) >= self.VERBOSE_EVALUATORS,
         )
         init_timer.node["physics init & OBL cache load"].stop()
-        if platform == "gpu":
+        from darts.linear_solvers.solver import _hip_amgcl_registered
+
+        if platform == "gpu" and not _hip_amgcl_registered():
+            # NVIDIA GPU build: the engine factory consumes this enum.
+            # The AMD port registers rocalution_cpr instead, and that solver's
+            # AMGCL preconditioner is the HIP backend.
             self.params.linear_type = sim_params.gpu_gmres_cpr_amgx_ilu
         self.params.sim_eps = self.physics.sim_eps
 

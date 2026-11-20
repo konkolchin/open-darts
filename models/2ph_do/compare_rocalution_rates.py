@@ -1,7 +1,7 @@
-"""Compare 2ph_do well rates: CPU solver, rocALUTION GMRES+Jacobi, rocALUTION CPR.
+"""Compare 2ph_do well rates: CPU engine against the AMD GPU rocALUTION CPR run.
 
 The gate is store_well_time_data, not iteration counts. Run from models/2ph_do
-after a WITH_ROCALUTION MT build has installed the Python extensions into darts/.
+after an OPENDARTS_CONFIG=GPU WITH_ROCALUTION build has installed the extensions.
 """
 
 import os
@@ -30,29 +30,16 @@ def _numbers(value, prefix, out):
         out.append((prefix[:-1], arr.ravel()))
 
 
-def run_case(label, solver_name):
+def run_case(label, platform):
     case = Model()
-    case.init()
+    case.init(platform=platform)
     case.params.max_i_linear = 500
     case.params.tolerance_linear = 1e-6
-    handle = None
-    if solver_name is not None:
-        import darts.linear_solvers as linear_solvers
-
-        config = linear_solvers.SolverConfig()
-        config.max_iterations = 500
-        config.tolerance = 1e-6
-        handle = linear_solvers.create_linear_solver(
-            solver_name, config, case.physics.n_vars
-        )
-        case.physics.engine.set_linear_solver(handle, solver_name)
     case.set_output(output_folder="output_" + label, verbose=0)
     case.run(300)
     data = case.output.store_well_time_data(save_output_files=False)
     flat = []
     _numbers(data, "", flat)
-    # Keep the solver alive until the run has finished.
-    case._solver_handle = handle
     return flat
 
 
@@ -82,14 +69,11 @@ def compare(reference, other, label):
 
 
 def main():
-    print("---- CPU solver")
-    cpu = run_case("cpu", None)
-    print("---- rocALUTION GMRES + Jacobi")
-    gmres = run_case("rocalution", "rocalution")
-    print("---- rocALUTION CPR (AMG pressure, ILU full system)")
-    cpr = run_case("rocalution_cpr", "rocalution_cpr")
-    ok = compare(cpu, gmres, "rocalution") and compare(cpu, cpr, "rocalution_cpr")
-    if not ok:
+    print("---- CPU engine")
+    cpu = run_case("cpu", "cpu")
+    print("---- GPU engine, rocALUTION CPR")
+    gpu = run_case("gpu", "gpu")
+    if not compare(cpu, gpu, "gpu"):
         sys.exit(1)
     print("WELL RATES OK")
 

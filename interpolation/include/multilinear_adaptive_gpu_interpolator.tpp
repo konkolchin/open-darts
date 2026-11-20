@@ -7,6 +7,10 @@
 #include <algorithm>
 #include <climits>
 #include <cmath>
+#include <cstdint>
+#include <cstring>
+#include <filesystem>
+#include <vector>
 #include <thrust/unique.h>
 #include <thrust/copy.h>
 #include <thrust/execution_policy.h>
@@ -174,6 +178,139 @@ int multilinear_adaptive_gpu_interpolator<value_t, N_DIMS, N_OPS>::generate_hype
   return 0;
 }
 
+// ─── one-shot Hyperloom snapshot ───────────────────────────────────────────────
+
+// Copies one interpolation launch to raw bins when OD_HYPERLOOM_DUMP=1. Unset, this is a no-op.
+template <typename value_t, uint8_t N_DIMS, uint16_t N_OPS>
+void od_hyperloom_dump_interpolation_launch(
+    bool first_stage, int n_states_idxs, int block_size,
+    double *states_d, int *states_idxs_d, double *values_d, double *derivatives_d,
+    const value_t *axis_min_d, const value_t *axis_step_d, const value_t *axis_step_inv_d,
+    gpu_hashmap_async::gpu_hash_map<value_t, (1 << N_DIMS) * N_OPS> *hypercube_data_d,
+    const cell_key_t<N_DIMS> *state_hc_keys)
+{
+  const char *flag = std::getenv("OD_HYPERLOOM_DUMP");
+  if (flag == nullptr || std::strcmp(flag, "1") != 0)
+    return;
+  if (!(first_stage && N_DIMS == 4 && N_OPS == 56 && n_states_idxs >= 100000))
+    return;
+
+  static bool dumped = false;
+  if (dumped)
+    return;
+
+  cudaDeviceSynchronize();
+
+  const char *dir_env = std::getenv("OD_HYPERLOOM_DIR");
+  const std::string dir = (dir_env != nullptr && dir_env[0] != '\0')
+                               ? std::string(dir_env)
+                               : std::string(std::getenv("HOME") ? std::getenv("HOME") : ".") + "/od-obl-snapshot";
+  std::filesystem::create_directories(dir);
+
+  std::vector<cell_key_t<N_DIMS>> keys(static_cast<size_t>(n_states_idxs));
+  cudaMemcpy(keys.data(), state_hc_keys, keys.size() * sizeof(cell_key_t<N_DIMS>), cudaMemcpyDeviceToHost);
+  int n_sentinel = 0;
+  for (const cell_key_t<N_DIMS> &key : keys)
+  {
+    if (key.idx[0] == INT32_MIN)
+      ++n_sentinel;
+  }
+  // The first large stage-1 launch is the cache miss and returns without writing operators.
+  // Keep that launch out of the snapshot; the next one interpolates the cached hypercubes.
+  if (n_sentinel * 2 < n_states_idxs)
+    return;
+  dumped = true;
+
+  std::vector<int> idxs(static_cast<size_t>(n_states_idxs));
+  cudaMemcpy(idxs.data(), states_idxs_d, idxs.size() * sizeof(int), cudaMemcpyDeviceToHost);
+  int max_idx = 0;
+  for (int idx : idxs)
+  {
+    if (idx > max_idx)
+      max_idx = idx;
+  }
+  const uint32_t n_state_slots = static_cast<uint32_t>(max_idx) + 1;
+
+  using map_t = gpu_hashmap_async::gpu_hash_map<value_t, (1 << N_DIMS) * N_OPS>;
+  using slot_t = gpu_hashmap_async::key_vector<value_t, (1 << N_DIMS) * N_OPS>;
+  map_t host_map{};
+  cudaMemcpy(&host_map, hypercube_data_d, sizeof(host_map), cudaMemcpyDeviceToHost);
+
+  auto write_device = [&](const std::string &name, const void *src, size_t bytes) {
+    std::ofstream out(dir + "/" + name, std::ios::binary);
+    const size_t chunk = 64u * 1024u * 1024u;
+    std::vector<char> buf(std::min(chunk, std::max<size_t>(bytes, 1)));
+    for (size_t off = 0; off < bytes; off += chunk)
+    {
+      const size_t n = std::min(chunk, bytes - off);
+      cudaMemcpy(buf.data(), static_cast<const char *>(src) + off, n, cudaMemcpyDeviceToHost);
+      out.write(buf.data(), static_cast<std::streamsize>(n));
+    }
+  };
+
+  struct Scalars
+  {
+    uint32_t magic;
+    uint32_t n_states_idxs;
+    uint32_t n_state_slots;
+    uint32_t map_slots;
+    uint32_t map_occupied;
+    uint32_t n_dims;
+    uint32_t n_ops;
+    uint32_t block_size;
+    uint32_t first_stage;
+    uint32_t slot_bytes;
+    uint32_t key_bytes;
+    uint32_t map_bytes;
+    double axes_origin[4];
+    double axes_step[4];
+    double axes_step_inv[4];
+  };
+  Scalars scalars{};
+  scalars.magic = 0x4F424C31u;
+  scalars.n_states_idxs = static_cast<uint32_t>(n_states_idxs);
+  scalars.n_state_slots = n_state_slots;
+  scalars.map_slots = static_cast<uint32_t>(host_map.size);
+  scalars.map_occupied = static_cast<uint32_t>(host_map.occupied);
+  scalars.n_dims = N_DIMS;
+  scalars.n_ops = N_OPS;
+  scalars.block_size = static_cast<uint32_t>(block_size);
+  scalars.first_stage = 1;
+  scalars.slot_bytes = static_cast<uint32_t>(sizeof(slot_t));
+  scalars.key_bytes = static_cast<uint32_t>(sizeof(cell_key_t<N_DIMS>));
+  scalars.map_bytes = static_cast<uint32_t>(sizeof(map_t));
+  cudaMemcpy(scalars.axes_origin, axis_min_d, sizeof(scalars.axes_origin), cudaMemcpyDeviceToHost);
+  cudaMemcpy(scalars.axes_step, axis_step_d, sizeof(scalars.axes_step), cudaMemcpyDeviceToHost);
+  cudaMemcpy(scalars.axes_step_inv, axis_step_inv_d, sizeof(scalars.axes_step_inv), cudaMemcpyDeviceToHost);
+
+  {
+    std::ofstream out(dir + "/scalars.bin", std::ios::binary);
+    out.write(reinterpret_cast<const char *>(&scalars), sizeof(scalars));
+  }
+  {
+    std::ofstream out(dir + "/states_idxs.bin", std::ios::binary);
+    out.write(reinterpret_cast<const char *>(idxs.data()), static_cast<std::streamsize>(idxs.size() * sizeof(int)));
+  }
+  write_device("states.bin", states_d, static_cast<size_t>(n_state_slots) * N_DIMS * sizeof(double));
+  write_device("hc_keys.bin", state_hc_keys, static_cast<size_t>(n_states_idxs) * sizeof(cell_key_t<N_DIMS>));
+  write_device("hashmap_slots.bin", host_map.data, static_cast<size_t>(host_map.size) * sizeof(slot_t));
+  write_device("values.bin", values_d, static_cast<size_t>(n_state_slots) * N_OPS * sizeof(double));
+  write_device("derivatives.bin", derivatives_d, static_cast<size_t>(n_state_slots) * N_OPS * N_DIMS * sizeof(double));
+
+  const unsigned n_threads = static_cast<unsigned>(n_states_idxs) * N_OPS;
+  const unsigned grid_x = (n_threads + static_cast<unsigned>(block_size) - 1) / static_cast<unsigned>(block_size);
+  std::ofstream launch(dir + "/launch.txt");
+  launch << "kernel multilinear_adaptive_interpolate_thread_per_operator_stages_kernel<double,4,56,true>\n"
+         << "global " << n_threads << " 1 1\n"
+         << "grid " << grid_x << " 1 1\n"
+         << "block " << block_size << " 1 1\n"
+         << "dynamic_shared 0\n"
+         << "stream 0\n";
+  launch.flush();
+  std::cout << "OD_HYPERLOOM_DUMP_OK dir=" << dir << " states=" << n_states_idxs
+            << " global=" << n_threads << " block=" << block_size << " lds=0 stream=0" << std::endl;
+}
+
 // ─── batch evaluation ──────────────────────────────────────────────────────────
 
 template <typename value_t, uint8_t N_DIMS, uint16_t N_OPS>
@@ -202,6 +339,12 @@ void multilinear_adaptive_gpu_interpolator<value_t, N_DIMS, N_OPS>::launch_inter
           thrust::raw_pointer_cast(state_hc_keys_d.data()),
           values_d, derivatives_d);
 #endif
+  od_hyperloom_dump_interpolation_launch<value_t, N_DIMS, N_OPS>(
+      FIRST_STAGE, n_states_idxs, this->kernel_block_size, states_d, states_idxs_d, values_d, derivatives_d,
+      thrust::raw_pointer_cast(this->axes_origin_d.data()),
+      thrust::raw_pointer_cast(this->axes_step_d.data()),
+      thrust::raw_pointer_cast(this->axes_step_inv_d.data()),
+      hypercube_data_d, thrust::raw_pointer_cast(state_hc_keys_d.data()));
 }
 
 template <typename value_t, uint8_t N_DIMS, uint16_t N_OPS>
@@ -455,9 +598,15 @@ __global__ void multilinear_adaptive3_check_hypercube_ready_kernel(
 
   // Count the states with a missing hypercube once per warp. Every lane reaches the
   // ballot (there is no early return above), so the block size must be a multiple of 32.
+#ifdef __HIPCC__
+  const unsigned long long missing_lanes = __ballot_sync(~0ull, missing);
+  if (missing_lanes != 0ull && (threadIdx.x & 63u) == 0u)
+    atomicAdd(&batch_status_d[0], __popcll(missing_lanes));
+#else
   const unsigned missing_lanes = __ballot_sync(0xffffffffu, missing);
   if (missing_lanes != 0u && (threadIdx.x & 31u) == 0u)
     atomicAdd(&batch_status_d[0], __popc(missing_lanes));
+#endif
 }
 
 template <typename value_t, uint8_t N_DIMS, uint16_t N_OPS, bool FIRST_STAGE>

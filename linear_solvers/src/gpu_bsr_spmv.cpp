@@ -13,7 +13,7 @@
 //    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 // *************************************************************************
 
-#ifdef WITH_GPU
+#if defined(WITH_GPU) && !defined(OD_HIP_GPU)
 
 #include <cstdint>
 #include <cstdio>
@@ -332,4 +332,54 @@ namespace opendarts
 
 #pragma GCC diagnostic pop
 
-#endif // WITH_GPU
+#endif // WITH_GPU && !OD_HIP_GPU
+
+#if defined(WITH_GPU) && defined(OD_HIP_GPU)
+
+#include "gpu_bsr_spmv.hpp"
+
+namespace opendarts
+{
+  namespace linear_solvers
+  {
+    gpu_bsr_spmv::gpu_bsr_spmv(block_csr_matrix &matrix) : matrix_(&matrix) {}
+
+    gpu_bsr_spmv::~gpu_bsr_spmv() = default;
+
+    gpu_bsr_spmv::gpu_bsr_spmv(gpu_bsr_spmv &&other) noexcept
+      : matrix_(other.matrix_)
+    {
+      other.matrix_ = nullptr;
+    }
+
+    gpu_bsr_spmv &gpu_bsr_spmv::operator=(gpu_bsr_spmv &&other) noexcept
+    {
+      if (this != &other)
+      {
+        matrix_ = other.matrix_;
+        other.matrix_ = nullptr;
+      }
+      return *this;
+    }
+
+    int gpu_bsr_spmv::matrix_vector_product_d(const double *, double *) const { return 1; }
+
+    int gpu_bsr_spmv::matrix_vector_product_d0(const double *, double *) const { return 1; }
+
+    int gpu_bsr_spmv::calc_lin_comb_d(double, double, const double *, const double *, double *) const
+    {
+      return 1;
+    }
+
+    int gpu_bsr_spmv::matrix_vector_product_t_d0(const double *, double *) { return 1; }
+
+    int gpu_bsr_spmv::calc_lin_comb_t_d(double, double, const double *, const double *, double *)
+    {
+      return 1;
+    }
+
+    int gpu_bsr_spmv::build_scalar_csr_device() { return 1; }
+  }
+}
+
+#endif

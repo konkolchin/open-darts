@@ -18,10 +18,15 @@ function(od_add_rocalution_test target source)
   target_compile_definitions(${target} PRIVATE _GLIBCXX_USE_CXX11_ABI=1)
   # Archive first, then the shared rocALUTION library, so a single-pass
   # link resolves symbols from linsolv_rocalution.o.
+  # The archive is linked by file path, so linear_solvers' interface
+  # libraries are not pulled in. hipSPARSE is required by the AMGCL HIP backend.
+  find_library(OD_HIPSPARSE_LIBRARY hipsparse
+    HINTS ${ROCM_PATH}/lib ${ROCM_PATH}/lib64)
   target_link_libraries(${target}
     PRIVATE
       "$<TARGET_LINKER_FILE:linear_solvers>"
-      rocalution::rocalution)
+      rocalution::rocalution
+      ${OD_HIPSPARSE_LIBRARY})
   add_dependencies(${target} linear_solvers)
   add_test(NAME ${target} COMMAND ${target})
 endfunction()

@@ -5,6 +5,7 @@
 #include <iostream>
 #include <vector>
 
+#include <hip/hip_runtime.h>
 #include <rocalution/rocalution.hpp>
 
 namespace
@@ -12,8 +13,9 @@ namespace
 using matrix = rocalution::LocalMatrix<double>;
 using vector = rocalution::LocalVector<double>;
 
-// rocALUTION preconditioner slot. apply() runs on the host; FGMRES stays on
-// the host with it so the Krylov basis and the AMGCL vectors are the same memory.
+// rocALUTION preconditioner slot. AMGCL runs on the device. FGMRES is on the
+// device as well, and these two buffers are device memory so Solve does not
+// bring the Krylov vector back to the host.
 class amgcl_slot : public rocalution::Preconditioner<matrix, vector, double>
 {
 public:
@@ -21,15 +23,15 @@ public:
 
   void Print(void) const override {}
 
+  bool ready() const { return prec_ != nullptr; }
+
   void Solve(const vector &rhs, vector *x) override
   {
-    if (prec_ == nullptr || x == nullptr)
+    if (prec_ == nullptr || x == nullptr || d_b_ == nullptr || d_x_ == nullptr)
       return;
-    host_b_.resize(static_cast<std::size_t>(n_));
-    host_x_.resize(static_cast<std::size_t>(n_));
-    rhs.CopyToHostData(host_b_.data());
-    amgcl_prec_apply(prec_, host_b_.data(), host_x_.data());
-    x->CopyFromHostData(host_x_.data());
+    rhs.CopyToData(d_b_);
+    amgcl_prec_apply(prec_, d_b_, d_x_);
+    x->CopyFromData(d_x_);
   }
 
   void Build(void) override
@@ -41,6 +43,12 @@ public:
   {
     amgcl_prec_destroy(prec_);
     prec_ = nullptr;
+    if (d_b_ != nullptr)
+      hipFree(d_b_);
+    if (d_x_ != nullptr)
+      hipFree(d_x_);
+    d_b_ = nullptr;
+    d_x_ = nullptr;
     this->build_ = false;
   }
 
@@ -49,6 +57,11 @@ public:
     Clear();
     n_ = n;
     prec_ = amgcl_prec_create(kind, block_size, n, row, col, val);
+    if (prec_ == nullptr)
+      return;
+    if (hipMalloc(&d_b_, sizeof(double) * static_cast<std::size_t>(n)) != hipSuccess
+        || hipMalloc(&d_x_, sizeof(double) * static_cast<std::size_t>(n)) != hipSuccess)
+      Clear();
   }
 
 protected:
@@ -58,8 +71,8 @@ protected:
 private:
   amgcl_prec *prec_ = nullptr;
   int n_ = 0;
-  std::vector<double> host_b_;
-  std::vector<double> host_x_;
+  double *d_b_ = nullptr;
+  double *d_x_ = nullptr;
 };
 } // namespace
 
@@ -219,6 +232,8 @@ int linsolv_rocalution::setup()
   {
     impl->amgcl.arm(impl->prec_kind, impl->block_size, impl->n_rows,
         impl->row_ptr.data(), impl->col_ind.data(), impl->values.data());
+    if (!impl->amgcl.ready())
+      return -1;
     impl->fgmres.SetPreconditioner(impl->amgcl);
   }
   else
@@ -232,15 +247,12 @@ int linsolv_rocalution::setup()
   impl->fgmres.Verbose(impl->verbose);
   impl->fgmres.Build();
 
-  // AMGCL runs on the host. Keep FGMRES there too, so a preconditioner
-  // application does not bounce the Krylov vector through the device.
-  if (!amgcl)
-  {
-    impl->A.MoveToAccelerator();
-    impl->rhs.MoveToAccelerator();
-    impl->x.MoveToAccelerator();
-    impl->fgmres.MoveToAccelerator();
-  }
+  // AMGCL's HIP backend and rocALUTION's Jacobi both run on the device.
+  // FGMRES stays there with them.
+  impl->A.MoveToAccelerator();
+  impl->rhs.MoveToAccelerator();
+  impl->x.MoveToAccelerator();
+  impl->fgmres.MoveToAccelerator();
   impl->built = true;
 
   if (impl->verbose)
@@ -249,7 +261,7 @@ int linsolv_rocalution::setup()
                       : impl->prec_kind == 2 ? "AMGCL AMG"
                       : impl->prec_kind == 1 ? "AMGCL ILU(0)"
                                              : "Jacobi")
-              << (amgcl ? " on host" : " on device ") << impl->device_num
+              << " on device " << impl->device_num
               << ", n=" << impl->n_rows << ", nnz=" << impl->nnz << std::endl;
   return 0;
 }

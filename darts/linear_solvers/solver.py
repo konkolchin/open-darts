@@ -116,6 +116,15 @@ def _describe_solver_spec(spec) -> str:
         return ""
 
 
+def _hip_amgcl_registered() -> bool:
+    """True when this build can run AMGCL on the HIP backend."""
+    try:
+        from darts.linear_solvers.linear_solvers import is_solver_registered
+    except ImportError:
+        return False
+    return bool(is_solver_registered("rocalution_cpr"))
+
+
 class LinearSolver:
     """Runtime linear solver bound to a model at ``reset()``/``init()`` time.
 
@@ -306,7 +315,11 @@ class LinearSolver:
         self.python_solver = None
         platform = getattr(model, "platform", "cpu")
         if platform == "gpu":
-            # GPU: a GPUSolverSpec on self names a params.linear_type enum;
+            # AMD port: rocalution_cpr is FGMRES plus AMGCL on the HIP backend.
+            # It is injected here so the engine factory does not build AMGX.
+            if self._apply_hip_amgcl():
+                return
+            # NVIDIA GPU build: a GPUSolverSpec on self names a params.linear_type enum;
             # the GPU engine factory builds the actual solver. Translate it here.
             self._apply_gpu_solver()
             return
@@ -385,6 +398,30 @@ class LinearSolver:
             self.handle = spec.build(block_size)
         # Human-readable label for the engine's "Linear solver type is ..." log line.
         model.physics.engine.set_linear_solver(self.handle, _describe_solver_spec(spec))
+
+    def _apply_hip_amgcl(self) -> bool:
+        """Install rocALUTION FGMRES + AMGCL CPR when this build has it.
+
+        The AMGCL preconditioner in that solver is compiled as the HIP backend.
+        Returns False on a build that did not register ``rocalution_cpr``.
+        """
+        if not _hip_amgcl_registered():
+            return False
+        import darts.linear_solvers.linear_solvers as compiled
+
+        model = self.model
+        spec = self._resolve_solver_spec()
+        config = compiled.SolverConfig()
+        spec_iters = getattr(spec, "max_iterations", None) if spec is not None else None
+        spec_tol = getattr(spec, "tolerance", None) if spec is not None else None
+        config.max_iterations = int(spec_iters or model.params.max_i_linear or 50)
+        config.tolerance = float(spec_tol or model.params.tolerance_linear or 1e-6)
+        handle = compiled.create_linear_solver(
+            "rocalution_cpr", config, self._block_size()
+        )
+        self.handle = handle
+        model.physics.engine.set_linear_solver(handle, "rocalution_cpr")
+        return True
 
     def _apply_gpu_solver(self):
         """Translate a GPU ``LinearSolverSpec`` on ``self`` to ``params.linear_type``.

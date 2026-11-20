@@ -72,6 +72,12 @@ struct engine_super_gpu_exposer
 
 void pybind_engine_super_gpu(py::module &m)
 {
+#ifdef OD_HIP_GPU
+  // Isothermal dead oil: 2 components, 2 phases. This is the engine models/2ph_do runs.
+  engine_super_gpu_exposer<2, 2, false>::expose(m);
+  // Isothermal compositional: 4 components, 3 phases. This is the engine models/3ph_comp_w runs.
+  engine_super_gpu_exposer<4, 3, false>::expose(m);
+#else
   recursive_exposer_nc_np_t<engine_super_gpu_exposer, py::module, 2, MAX_NC, 1, false> re;
   re.expose(m);
 
@@ -95,6 +101,7 @@ void pybind_engine_super_gpu(py::module &m)
   // hydrate (or ice), optionally with the kinetic hydrate pseudo-component
   recursive_exposer_nc_np_t<engine_super_gpu_exposer, py::module, 2, 3, 4, true> re6;
   re6.expose(m);
+#endif
 }
 
 #endif //PYBIND11_ENABLED

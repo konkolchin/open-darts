@@ -8,6 +8,28 @@
 
 #include "globals.h"
 
+#ifdef OD_HIP_GPU
+#include <hip/hip_runtime.h>
+#include <cuda_runtime.h>
+#define OD_RT_MALLOC hipMalloc
+#define OD_RT_FREE hipFree
+#define OD_RT_MEMCPY hipMemcpy
+#define OD_RT_H2D hipMemcpyHostToDevice
+#define OD_RT_D2H hipMemcpyDeviceToHost
+#define OD_RT_D2D hipMemcpyDeviceToDevice
+#define OD_RT_MEMINFO hipMemGetInfo
+#define OD_RT_OCCUPANCY hipOccupancyMaxPotentialBlockSize
+#else
+#define OD_RT_MALLOC cudaMalloc
+#define OD_RT_FREE cudaFree
+#define OD_RT_MEMCPY cudaMemcpy
+#define OD_RT_H2D cudaMemcpyHostToDevice
+#define OD_RT_D2H cudaMemcpyDeviceToHost
+#define OD_RT_D2D cudaMemcpyDeviceToDevice
+#define OD_RT_MEMINFO cudaMemGetInfo
+#define OD_RT_OCCUPANCY cudaOccupancyMaxPotentialBlockSize
+#endif
+
 #define KERNEL_1D_THREAD(n_threads_total, n_threads_block) \
 <<<(n_threads_total + n_threads_block - 1) / n_threads_block, n_threads_block>>>
 
@@ -44,19 +66,19 @@ static void CheckCudaErrorAux(const char *file, unsigned line, const char *state
 template <typename T>
 void allocate_device_data(std::vector<T> &host_data, T **device_data)
 {
-  CUDA_CHECK_RETURN(cudaMalloc((void **)device_data, sizeof(T) * host_data.size()));
+  CUDA_CHECK_RETURN(OD_RT_MALLOC((void **)device_data, sizeof(T) * host_data.size()));
 };
 
 template <typename T>
 void allocate_device_data(T **device_data, int data_size)
 {
-  CUDA_CHECK_RETURN(cudaMalloc((void **)device_data, sizeof(T) * data_size));
+  CUDA_CHECK_RETURN(OD_RT_MALLOC((void **)device_data, sizeof(T) * data_size));
 };
 
 template <typename T>
 void free_device_data(T *device_data)
 {
-  CUDA_CHECK_RETURN(cudaFree(device_data));
+  CUDA_CHECK_RETURN(OD_RT_FREE(device_data));
 };
 
 inline void print_gpu_mem_usage()
@@ -65,7 +87,7 @@ inline void print_gpu_mem_usage()
 
   size_t free_t, total_t;
 
-  cudaMemGetInfo(&free_t, &total_t);
+  OD_RT_MEMINFO(&free_t, &total_t);
 
   free_gb = (double)free_t / (1024 * 1024 * 1024);
   total_gb = (double)total_t / (1024 * 1024 * 1024);
@@ -76,13 +98,13 @@ inline void print_gpu_mem_usage()
 template <typename T>
 void copy_data_to_device(std::vector<T> &host_data, T *device_data)
 {
-  CUDA_CHECK_RETURN(cudaMemcpy(device_data, &host_data[0], sizeof(T) * host_data.size(), cudaMemcpyHostToDevice));
+  CUDA_CHECK_RETURN(OD_RT_MEMCPY(device_data, &host_data[0], sizeof(T) * host_data.size(), OD_RT_H2D));
 };
 
 template <typename T>
 void copy_data_to_device(const T *host_data, T *device_data, int data_size)
 {
-  CUDA_CHECK_RETURN(cudaMemcpy(device_data, host_data, sizeof(T) * data_size, cudaMemcpyHostToDevice));
+  CUDA_CHECK_RETURN(OD_RT_MEMCPY(device_data, host_data, sizeof(T) * data_size, OD_RT_H2D));
 };
 
 template <typename T>
@@ -90,13 +112,13 @@ void copy_data_to_host(std::vector<T> &host_data, T *device_data, int data_size 
 {
   if (data_size)
     host_data.resize(data_size);
-  CUDA_CHECK_RETURN(cudaMemcpy(&host_data[0], device_data, sizeof(T) * host_data.size(), cudaMemcpyDeviceToHost));
+  CUDA_CHECK_RETURN(OD_RT_MEMCPY(&host_data[0], device_data, sizeof(T) * host_data.size(), OD_RT_D2H));
 };
 
 template <typename T>
 void copy_data_to_host(T *host_data, T *device_data, int data_size)
 {
-  CUDA_CHECK_RETURN(cudaMemcpy(host_data, device_data, sizeof(T) * data_size, cudaMemcpyDeviceToHost));
+  CUDA_CHECK_RETURN(OD_RT_MEMCPY(host_data, device_data, sizeof(T) * data_size, OD_RT_D2H));
 };
 
 template <typename T>
@@ -109,7 +131,7 @@ void write_device_vector_to_file(std::string filename, std::vector<T> &host_data
 template <typename T>
 void copy_data_within_device(T *dest, T *src, int data_size)
 {
-  CUDA_CHECK_RETURN(cudaMemcpy(dest, src, sizeof(T) * data_size, cudaMemcpyDeviceToDevice));
+  CUDA_CHECK_RETURN(OD_RT_MEMCPY(dest, src, sizeof(T) * data_size, OD_RT_D2D));
 };
 
 template <typename T>
@@ -152,7 +174,7 @@ __host__ int get_kernel_thread_block_size(T kernel, int &min_job_size, size_t dy
 {
   int min_grid_size;
   int kernel_block_size;
-  cudaOccupancyMaxPotentialBlockSize(&min_grid_size, &kernel_block_size, kernel, dynamic_shared_memory_size, block_size_limit);
+  OD_RT_OCCUPANCY(&min_grid_size, &kernel_block_size, kernel, dynamic_shared_memory_size, block_size_limit);
   min_job_size = min_grid_size * kernel_block_size - kernel_block_size + 1;
   return kernel_block_size;
 }

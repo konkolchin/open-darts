@@ -24,6 +24,9 @@
 #ifdef WITH_GPU
 #include "od_gpu_runtime.hpp"
 #endif
+#ifdef OD_PORT_BENCH
+#include "port_bench_time.hpp"
+#endif
 
 #include "linsolv_schur_elim.hpp"
 
@@ -1122,6 +1125,7 @@ namespace opendarts
 #if OD_SE_NMAX > 16
 #error "OD_SE_NMAX exceeds the written instantiation ceiling (16); extend the OD_SE_INST list below."
 #endif
+#ifndef OD_PORT_BENCH
 #define OD_SE_INST(N, K) template class linsolv_schur_elim<N, K>;
     OD_SE_INST(2, 1)
     OD_SE_INST(3, 1) OD_SE_INST(3, 2)
@@ -1145,5 +1149,75 @@ namespace opendarts
     OD_SE_INST(16, 1) OD_SE_INST(16, 2) OD_SE_INST(16, 3) OD_SE_INST(16, 4)
 #endif
 #undef OD_SE_INST
+#endif // !OD_PORT_BENCH
+
+#ifdef OD_PORT_BENCH
+// 2x2 diagonal block, eliminate unknown 0, keep unknown 1. Pivot entry is 2,
+// so each inverse is exactly 1/2.
+extern "C" int od_bench_schur(int n, int warmup, int samples, double *median_ms, double *checksum)
+{
+  using opendarts::config::index_t;
+  using opendarts::config::mat_float;
+  index_t *diag = nullptr;
+  mat_float *values = nullptr;
+  uint8_t *e_rows = nullptr;
+  uint8_t *elim_cols = nullptr;
+  uint8_t *keep_cols = nullptr;
+  mat_float *Pinv = nullptr;
+  mat_float *Gm = nullptr;
+  int *pivot_bad = nullptr;
+  std::vector<index_t> hdiag((size_t)n);
+  std::vector<mat_float> hval((size_t)n * 4, 0);
+  std::vector<uint8_t> her((size_t)n, 0);
+  uint8_t helim = 0;
+  uint8_t hkeep = 1;
+  for (int i = 0; i < n; ++i)
+  {
+    hdiag[(size_t)i] = i;
+    hval[(size_t)i * 4] = 2;
+  }
+  if (hipMalloc(&diag, hdiag.size() * sizeof(index_t)) != hipSuccess ||
+      hipMalloc(&values, hval.size() * sizeof(mat_float)) != hipSuccess ||
+      hipMalloc(&e_rows, her.size()) != hipSuccess ||
+      hipMalloc(&elim_cols, 1) != hipSuccess ||
+      hipMalloc(&keep_cols, 1) != hipSuccess ||
+      hipMalloc(&Pinv, (size_t)n * sizeof(mat_float)) != hipSuccess ||
+      hipMalloc(&Gm, (size_t)n * sizeof(mat_float)) != hipSuccess ||
+      hipMalloc(&pivot_bad, sizeof(int)) != hipSuccess)
+    return 2;
+  if (hipMemcpy(diag, hdiag.data(), hdiag.size() * sizeof(index_t), hipMemcpyHostToDevice) != hipSuccess ||
+      hipMemcpy(values, hval.data(), hval.size() * sizeof(mat_float), hipMemcpyHostToDevice) != hipSuccess ||
+      hipMemcpy(e_rows, her.data(), her.size(), hipMemcpyHostToDevice) != hipSuccess ||
+      hipMemcpy(elim_cols, &helim, 1, hipMemcpyHostToDevice) != hipSuccess ||
+      hipMemcpy(keep_cols, &hkeep, 1, hipMemcpyHostToDevice) != hipSuccess ||
+      hipMemset(pivot_bad, 0, sizeof(int)) != hipSuccess)
+    return 2;
+  const int block = 256;
+  const int grid = (n + block - 1) / block;
+  auto launch = [&]() {
+    se_factors_kernel<2, 1, 1><<<grid, block>>>(n, diag, values, e_rows, elim_cols, keep_cols,
+                                                 Pinv, Gm, 1e-12, pivot_bad);
+  };
+  const int rc = od_port_time(warmup, samples, launch, median_ms);
+  if (rc == 0 &&
+      hipMemcpy(hval.data(), Pinv, (size_t)n * sizeof(mat_float), hipMemcpyDeviceToHost) != hipSuccess)
+    return 2;
+  double sum = 0;
+  if (rc == 0)
+    for (int i = 0; i < n; ++i)
+      sum += (double)hval[(size_t)i];
+  if (checksum)
+    *checksum = sum;
+  hipFree(diag);
+  hipFree(values);
+  hipFree(e_rows);
+  hipFree(elim_cols);
+  hipFree(keep_cols);
+  hipFree(Pinv);
+  hipFree(Gm);
+  hipFree(pivot_bad);
+  return rc;
+}
+#endif
   } // namespace linear_solvers
 } // namespace opendarts

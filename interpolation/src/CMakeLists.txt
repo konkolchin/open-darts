@@ -58,6 +58,23 @@ if (CUDA)
   )
 endif()
 
+if (OD_HIP_GPU)
+  set(HIP_INTERP_SOURCES
+    ${CMAKE_CURRENT_SOURCE_DIR}/evaluator_iface.cpp
+  )
+  set_source_files_properties(${HIP_INTERP_SOURCES} PROPERTIES LANGUAGE HIP)
+  target_sources(darts_interpolation PRIVATE
+    ${HIP_INTERP_SOURCES}
+    ${INTERPOLATION_INCLUDE_DIR}/gpu_hashmap_async.h
+    ${INTERPOLATION_INCLUDE_DIR}/gpu_hashmap_async.tpp
+    ${INTERPOLATION_INCLUDE_DIR}/gpu_tools.h
+    ${INTERPOLATION_INCLUDE_DIR}/multilinear_gpu_interpolator_base.hpp
+    ${INTERPOLATION_INCLUDE_DIR}/multilinear_gpu_interpolator_base.tpp
+    ${INTERPOLATION_INCLUDE_DIR}/multilinear_adaptive_gpu_interpolator.hpp
+    ${INTERPOLATION_INCLUDE_DIR}/multilinear_adaptive_gpu_interpolator.tpp
+  )
+endif()
+
 target_sources(darts_interpolation
   PRIVATE
     ${INTERPOLATION_SRC_FILES}

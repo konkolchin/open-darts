@@ -59,6 +59,27 @@ if (CUDA)
     PROPERTIES LANGUAGE CUDA)
 endif()
 
+if (OD_HIP_GPU)
+  set_source_files_properties(
+    ${CMAKE_CURRENT_SOURCE_DIR}/py_operator_set_interpolator_all.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/py_operator_set_interpolator_all_part1.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/py_operator_set_interpolator_all_part2.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/py_operator_set_interpolator_all_part3.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/py_operator_set_interpolator_all_part4.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/py_operator_set_interpolator_super.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/py_operator_set_interpolator_super_part1.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/py_operator_set_interpolator_super_part2.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/py_operator_set_interpolator_super_part3.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/py_operator_set_interpolator_super_part4.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/py_operator_set_interpolator_rates.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/py_operator_set_interpolator_rates_part1.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/py_operator_set_interpolator_rates_part2.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/py_operator_set_interpolator_rates_part3.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/py_operator_set_interpolator_pz_cap_gra.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/py_operator_set_interpolator_pze_gra.cpp
+    PROPERTIES LANGUAGE HIP)
+endif()
+
 if(NOT ENABLE_BOS_SOLVERS)
   target_compile_definitions(interpolators
     PUBLIC

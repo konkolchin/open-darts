@@ -388,9 +388,15 @@ grad_operators_active_kernel(const unsigned int n_res_blocks, const value_t *op_
       }
     }
   }
+#ifdef __HIPCC__
+  mass = __any_sync(~0ull, mass);
+  energy = __any_sync(~0ull, energy);
+  if ((threadIdx.x & 63) == 0)
+#else
   mass = __any_sync(0xffffffffu, mass);
   energy = __any_sync(0xffffffffu, energy);
   if ((threadIdx.x & 31) == 0)
+#endif
   {
     if (mass)
       atomicOr(&flags[0], 1);
@@ -948,7 +954,11 @@ int engine_super_gpu<NC, NP, THERMAL>::init(conn_mesh *mesh_, std::vector<ms_wel
   allocate_device_data(mesh->grav_coef, &mesh_grav_coef_d);
   allocate_device_data(mesh->cell_spe, &mesh_cell_spe_d);
   allocate_device_data(&grad_active_d, 2);
+#ifdef OD_HIP_GPU
+  hipMemset(grad_active_d, 0, 2 * sizeof(int));
+#else
   cudaMemset(grad_active_d, 0, 2 * sizeof(int));
+#endif
 
   copy_data_to_device(RV, RV_d);
   copy_data_to_device(mesh->heat_capacity, mesh_hcap_d);
@@ -1090,8 +1100,13 @@ int engine_super_gpu<NC, NP, THERMAL>::adjoint_gradient_assembly(value_t dt, std
   const index_t n_cns = mesh->n_conns;
 
   timer->node["adjoint jacobian assembly"].start_gpu();
+#ifdef OD_HIP_GPU
+  hipMemset(dg_dx_n_temp_values_d, 0, (n_cns + n_blk) * N_VARS_SQ * sizeof(value_t));
+  hipMemset(dg_dT_general_values_d, 0, n_cns * N_VARS * sizeof(value_t));
+#else
   cudaMemset(dg_dx_n_temp_values_d, 0, (n_cns + n_blk) * N_VARS_SQ * sizeof(value_t));
   cudaMemset(dg_dT_general_values_d, 0, n_cns * N_VARS * sizeof(value_t));
+#endif
 
   adjoint_gradient_assembly_kernel<NC, NP, NE, N_VARS, P_VAR, N_OPS, ACC_OP, FLUX_OP, DENS_OP, UPSAT_OP, GRAD_OP,
                                    KIN_OP, GRAV_OP, PC_OP, MULT_OP, LAMBDA_OP, TEMP_OP, THERMAL>

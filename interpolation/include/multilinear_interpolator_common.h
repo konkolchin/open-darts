@@ -6,9 +6,11 @@
 
 // define those to avoid warning indication in syntax check for non-nvcc compilers
 #ifndef __NVCC__
+#ifndef __HIPCC__
 #define __forceinline__
 #define __host__
 #define __device__
+#endif
 #endif
 
 // Smallest batch for which the CPU interpolators open an OpenMP parallel region. A smaller batch, such as the

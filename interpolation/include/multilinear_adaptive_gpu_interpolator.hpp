@@ -9,7 +9,11 @@
 #include <thrust/host_vector.h>
 
 #if 1 //def CUDA12
+#ifdef OD_HIP_GPU
+#include <thrust/system/hip/memory_resource.h>
+#else
 #include <thrust/system/cuda/memory_resource.h>
+#endif
 #else
 #include <pinned_allocator.h>
 #endif
@@ -53,7 +57,11 @@ public:
   typedef cell_key_hash<N_DIMS> key_hash_t;
 
 #if 1 //CUDA12
+#ifdef OD_HIP_GPU
+  using mr = thrust::hip::universal_host_pinned_memory_resource;
+#else
   using mr = thrust::cuda::universal_host_pinned_memory_resource;
+#endif
   using value_pinned_allocator = thrust::mr::stateless_resource_allocator<value_t, mr>;
   using int_pinned_allocator = thrust::mr::stateless_resource_allocator<int, mr>;
   using key_pinned_allocator = thrust::mr::stateless_resource_allocator<key_t, mr>;
@@ -61,9 +69,15 @@ public:
   typedef thrust::host_vector<int, int_pinned_allocator> pinned_int_vector_t;
   typedef thrust::host_vector<key_t, key_pinned_allocator> pinned_key_vector_t;
 #else
+#ifdef OD_HIP_GPU
+  typedef thrust::host_vector<value_t, thrust::hip::experimental::pinned_allocator<value_t>> pinned_value_vector_t;
+  typedef thrust::host_vector<int, thrust::hip::experimental::pinned_allocator<int>> pinned_int_vector_t;
+  typedef thrust::host_vector<key_t, thrust::hip::experimental::pinned_allocator<key_t>> pinned_key_vector_t;
+#else
   typedef thrust::host_vector<value_t, thrust::cuda::experimental::pinned_allocator<value_t>> pinned_value_vector_t;
   typedef thrust::host_vector<int, thrust::cuda::experimental::pinned_allocator<int>> pinned_int_vector_t;
   typedef thrust::host_vector<key_t, thrust::cuda::experimental::pinned_allocator<key_t>> pinned_key_vector_t;
+#endif
 #endif
 
   multilinear_adaptive_gpu_interpolator(operator_set_evaluator_iface *supporting_point_evaluator,

@@ -201,6 +201,14 @@ if(CUDA)
     set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/linsolv_cudss.cpp PROPERTIES LANGUAGE CUDA)
   endif()
 endif()
+if(OD_HIP_GPU)
+  # These two are in the always-built list and contain device kernels behind
+  # WITH_GPU. On the AMD GPU configuration they are HIP, in the solver library.
+  set_source_files_properties(
+    ${CMAKE_CURRENT_SOURCE_DIR}/linsolv_schur_elim.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/linsolv_block_row_perm.cpp
+    PROPERTIES LANGUAGE HIP)
+endif()
 # ------------------------------------------------------------------------------
 
 # Auto-generated explicit template instantiations
@@ -381,8 +389,9 @@ if(WITH_ROCALUTION)
   set(_od_rocalution_cxx
     ${CMAKE_SOURCE_DIR}/rocalution_solver/linsolv_rocalution_darts.cpp
     ${CMAKE_SOURCE_DIR}/rocalution_solver/linsolv_rocalution_cpr.cpp)
-  # AMGCL is host C++. Keep it out of hipcc, but on the same libstdc++ ABI as
-  # the rocALUTION translation unit that calls it.
+  # AMGCL HIP backend (hipSPARSE + rocThrust). Same libstdc++ ABI as the
+  # rocALUTION translation unit that calls it. Host setup stays serial:
+  # the HIP test link does not pull libgomp.
   set(_od_amgcl_cxx
     ${CMAKE_SOURCE_DIR}/rocalution_solver/amgcl_prec.cpp)
   if(NOT EXISTS "${CMAKE_SOURCE_DIR}/thirdparty/amgcl/amgcl/backend/builtin.hpp")
@@ -397,9 +406,15 @@ if(WITH_ROCALUTION)
   # for these systems, so this file is built without it.
   set_source_files_properties(${_od_amgcl_cxx}
     PROPERTIES
+      LANGUAGE HIP
       COMPILE_OPTIONS "-U_GLIBCXX_USE_CXX11_ABI;-D_GLIBCXX_USE_CXX11_ABI=1;-fno-openmp")
+  find_library(OD_HIPSPARSE_LIBRARY hipsparse
+    HINTS ${ROCM_PATH}/lib ${ROCM_PATH}/lib64)
+  if(NOT OD_HIPSPARSE_LIBRARY)
+    message(FATAL_ERROR "hipsparse not found under ${ROCM_PATH}")
+  endif()
   target_sources(linear_solvers PRIVATE ${_od_rocalution_hip} ${_od_rocalution_cxx} ${_od_amgcl_cxx})
-  target_link_libraries(linear_solvers PUBLIC rocalution::rocalution)
+  target_link_libraries(linear_solvers PUBLIC rocalution::rocalution ${OD_HIPSPARSE_LIBRARY})
   target_include_directories(linear_solvers
     PRIVATE
       ${CMAKE_SOURCE_DIR}/rocalution_solver
@@ -412,7 +427,7 @@ if(WITH_ROCALUTION)
   # here. gfx1100 is the first target (the compiler's CMAKE_HIP_ARCHITECTURES).
   # These objects are not linked into the CPU solver. The host assembly path
   # used by the Newton loop stays the one above.
-  if(NOT CUDA)
+  if(NOT CUDA AND NOT OD_HIP_GPU)
     set(_od_hip_device_src
       ${CMAKE_SOURCE_DIR}/rocalution_solver/hip_device/compile_schur.cpp
       ${CMAKE_SOURCE_DIR}/rocalution_solver/hip_device/compile_block_row_perm.cpp

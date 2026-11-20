@@ -11,6 +11,7 @@
 
 // define those to avoid warnings on non-NVCC compilers
 #ifndef __NVCC__
+#ifndef __HIPCC__
 #ifndef __forceinline__
 #define __forceinline__
 #endif
@@ -19,6 +20,7 @@
 #endif
 #ifndef __device__
 #define __device__
+#endif
 #endif
 #endif
 

@@ -64,6 +64,15 @@ if (CUDA)
   # set_target_properties(engines PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 endif()
 
+if (OD_HIP_GPU)
+  set(HIP_GPU_SOURCES
+    ${CMAKE_CURRENT_SOURCE_DIR}/py_engine_super_gpu.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/py_gpu_tools.cpp
+  )
+  set_source_files_properties(${HIP_GPU_SOURCES} PROPERTIES LANGUAGE HIP)
+  target_sources(engines PRIVATE ${HIP_GPU_SOURCES})
+endif()
+
 # We need to specify OPENDARTS_LINEAR_SOLVERS so that the compile is with
 # the opendarts linear solvers, otherwise it uses the old linear solvers
 if(NOT ENABLE_BOS_SOLVERS)

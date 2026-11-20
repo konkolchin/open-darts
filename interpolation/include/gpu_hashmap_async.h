@@ -12,6 +12,7 @@
 
 // define those to avoid warning indication in syntax check for non-nvcc compilers
 #ifndef __NVCC__
+#ifndef __HIPCC__
 #ifndef __forceinline__
 #define __forceinline__
 #endif
@@ -23,6 +24,7 @@
 #endif
 #ifndef __device__
 #define __device__
+#endif
 #endif
 #endif
 

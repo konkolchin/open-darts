@@ -10,6 +10,7 @@
 #include <cxxabi.h>
 #endif
 
+#ifndef OD_PORT_BENCH
 #include "engine_base_gpu.h"
 #ifdef OPENDARTS_LINEAR_SOLVERS
 #include "csr_matrix.hpp"
@@ -17,6 +18,11 @@
 #else
 #include "csr_matrix.h"
 #include "linsolv_iface.h"
+#endif
+#else
+#include <limits>
+using value_t = double;
+using index_t = int;
 #endif
 
 // use efficien reduction routine for future norm calculation
@@ -125,6 +131,58 @@ __global__ void average_operator_kernel(const value_t *op_vals, const index_t n_
 }
 } // namespace
 
+#ifdef OD_PORT_BENCH
+#include "port_bench_time.hpp"
+
+extern "C" int od_bench_residual(int n, int warmup, int samples, double *median_ms, double *checksum)
+{
+  const int n_vars = 2;
+  const int n_ops = 2;
+  value_t *rhs = nullptr;
+  value_t *pv = nullptr;
+  value_t *op = nullptr;
+  value_t *acc = nullptr;
+  if (hipMalloc(&rhs, (size_t)n * n_vars * sizeof(value_t)) != hipSuccess ||
+      hipMalloc(&pv, (size_t)n * sizeof(value_t)) != hipSuccess ||
+      hipMalloc(&op, (size_t)n * n_ops * sizeof(value_t)) != hipSuccess ||
+      hipMalloc(&acc, 2 * n_vars * sizeof(value_t)) != hipSuccess)
+    return 2;
+  if (hipMemset(rhs, 0, (size_t)n * n_vars * sizeof(value_t)) != hipSuccess ||
+      hipMemset(pv, 0, (size_t)n * sizeof(value_t)) != hipSuccess ||
+      hipMemset(op, 0, (size_t)n * n_ops * sizeof(value_t)) != hipSuccess ||
+      hipMemset(acc, 0, 2 * n_vars * sizeof(value_t)) != hipSuccess)
+    return 2;
+  // Ones: every partial sum is an integer, and 2^20 is exact in double,
+  // so the atomic reduction does not depend on addition order.
+  std::vector<value_t> ones((size_t)n * n_vars, 1.0);
+  if (hipMemcpy(rhs, ones.data(), ones.size() * sizeof(value_t), hipMemcpyHostToDevice) != hipSuccess ||
+      hipMemcpy(op, ones.data(), ones.size() * sizeof(value_t), hipMemcpyHostToDevice) != hipSuccess)
+    return 2;
+  ones.resize((size_t)n, 1.0);
+  if (hipMemcpy(pv, ones.data(), (size_t)n * sizeof(value_t), hipMemcpyHostToDevice) != hipSuccess)
+    return 2;
+
+  const int block = 256;
+  int grid = (n + block - 1) / block;
+  auto launch = [&]() {
+    newton_residual_l2_kernel<<<grid, block>>>(rhs, pv, op, n, n_vars, n_ops, acc);
+  };
+  const int rc = od_port_time(warmup, samples, launch, median_ms);
+  value_t host_acc[4] = {};
+  if (rc == 0 &&
+      hipMemcpy(host_acc, acc, sizeof(host_acc), hipMemcpyDeviceToHost) != hipSuccess)
+    return 2;
+  if (checksum)
+    *checksum = (double)host_acc[0] + (double)host_acc[1] + (double)host_acc[2] + (double)host_acc[3];
+  hipFree(rhs);
+  hipFree(pv);
+  hipFree(op);
+  hipFree(acc);
+  return rc;
+}
+#endif
+
+#ifndef OD_PORT_BENCH
 engine_base_gpu::~engine_base_gpu()
 {
   for (void *p : pinned_host_ptrs)
@@ -327,6 +385,18 @@ int engine_base_gpu::solve_linear_equation()
 	last_linear_iters = 0;
 
 	timer->node["linear solver setup"].start_gpu();
+#ifdef OD_HIP_GPU
+	// rocALUTION CPR reads the host matrix and the host residual, then moves
+	// that data onto the device for AMGCL. Assembly left the values on the device.
+#ifdef OPENDARTS_LINEAR_SOLVERS
+	copy_data_to_host(Jacobian->get_values(), Jacobian->get_values_d(),
+		Jacobian->n_row_size * Jacobian->n_row_size * Jacobian->get_rows_ptr()[mesh->n_blocks]);
+#else
+	copy_data_to_host(Jacobian->values, Jacobian->values_d,
+		Jacobian->n_row_size * Jacobian->n_row_size * Jacobian->rows_ptr[mesh->n_blocks]);
+#endif
+	copy_data_to_host(RHS, RHS_d);
+#endif
 	if (params->assembly_kernel == 13)
 	{
 		r_code = linear_solver->setup(this);
@@ -345,6 +415,15 @@ int engine_base_gpu::solve_linear_equation()
 	}
 
 	// dX_d is the solver's initial guess as well as its output: start from zero
+#ifdef OD_HIP_GPU
+	std::fill(dX.begin(), dX.end(), value_t(0));
+	timer->node["linear solver solve"].start_gpu();
+	r_code = linear_solver->solve(&RHS[0], &dX[0]);
+	timer->node["linear solver solve"].stop_gpu();
+	timer->node["host<->device_overhead"].start_gpu();
+	copy_data_to_device(dX, dX_d);
+	timer->node["host<->device_overhead"].stop_gpu();
+#else
 	cudaMemset(dX_d, 0, sizeof(value_t) * (size_t)dX.size());
 
 	timer->node["linear solver solve"].start_gpu();
@@ -354,6 +433,7 @@ int engine_base_gpu::solve_linear_equation()
 	timer->node["host<->device_overhead"].start_gpu();
 	copy_data_to_host(dX, dX_d);
 	timer->node["host<->device_overhead"].stop_gpu();
+#endif
 
   if (print_linear_system) //changed this to write jacobian to file!
   {
@@ -634,3 +714,4 @@ int engine_base_gpu::calc_lin_comb_d(value_t alpha, value_t beta, value_t *u_d, 
 
   return -1;
 }
+#endif // !OD_PORT_BENCH
